@@ -26,7 +26,7 @@ endif()
 
 # Generate appversion.h
 set(APP_VERSION_FILE "${PROJECT_BINARY_DIR}/appversion.h")
-configure_file("src/appversion.h.in" "${APP_VERSION_FILE}" @ONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/appversion.h.in" "${APP_VERSION_FILE}" @ONLY)
 
 # Define the precompiled headers
 target_precompile_headers("${TARGET_NAME}"
