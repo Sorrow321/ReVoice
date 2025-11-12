@@ -132,15 +132,8 @@ set_target_properties("${TARGET_NAME}"
 
 target_compile_definitions("${TARGET_NAME}"
   PRIVATE
-    $<$<PLATFORM_ID:Windows>:
-      _MBCS
-      _CRT_SECURE_NO_WARNINGS
-    >
-
-    $<$<NOT:$<PLATFORM_ID:Windows>>:
-      __int16=int16_t
-      _stricmp=strcasecmp
-    >
+    $<$<PLATFORM_ID:Windows>:_MBCS;_CRT_SECURE_NO_WARNINGS>
+    $<$<NOT:$<PLATFORM_ID:Windows>>:__int16=int16_t;_stricmp=strcasecmp>
 )
 
 #-------------------------------------------------------------------------------
@@ -165,11 +158,7 @@ target_link_libraries("${TARGET_NAME}"
     "Opus::opus"
     "Metamod::metamod"
 
-    $<$<NOT:$<PLATFORM_ID:Windows>>:
-      "c"
-      "m"
-      "${CMAKE_DL_LIBS}"
-    >
+    $<$<NOT:$<PLATFORM_ID:Windows>>:c;m;${CMAKE_DL_LIBS}>
 )
 
 #-------------------------------------------------------------------------------
