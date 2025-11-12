@@ -1,5 +1,43 @@
 #include "precompiled.h"
 
+ static void Wav_WriteHeader(FILE *f, int sampleRate, unsigned int dataBytes)
+{
+	if (!f) return;
+	unsigned int riffSize = 36 + dataBytes;
+	unsigned short audioFormat = 1; // PCM
+	unsigned short numChannels = 1;
+	unsigned short bitsPerSample = 16;
+	unsigned int byteRate = (unsigned int)sampleRate * numChannels * (bitsPerSample / 8);
+	unsigned short blockAlign = (unsigned short)(numChannels * (bitsPerSample / 8));
+
+	fseek(f, 0, SEEK_SET);
+	fwrite("RIFF", 1, 4, f);
+	fwrite(&riffSize, 4, 1, f);
+	fwrite("WAVE", 1, 4, f);
+	fwrite("fmt ", 1, 4, f);
+	unsigned int subchunk1Size = 16;
+	fwrite(&subchunk1Size, 4, 1, f);
+	fwrite(&audioFormat, 2, 1, f);
+	fwrite(&numChannels, 2, 1, f);
+	fwrite(&sampleRate, 4, 1, f);
+	fwrite(&byteRate, 4, 1, f);
+	fwrite(&blockAlign, 2, 1, f);
+	fwrite(&bitsPerSample, 2, 1, f);
+	fwrite("data", 1, 4, f);
+	fwrite(&dataBytes, 4, 1, f);
+}
+
+static void SanitizeId(char *s)
+{
+	for (; *s; ++s) {
+		if (*s == ':' || *s == '\\' || *s == '/' || *s == ' ' || *s == '"' || *s == '*'
+		 || *s == '?' || *s == '<' || *s == '>' || *s == '|')
+		{
+			*s = '_';
+		}
+	}
+}
+
 const char *CRevoicePlayer::m_szCodecType[] = {
 	"none",
 	"silk",
@@ -24,6 +62,66 @@ CRevoicePlayer::CRevoicePlayer()
 	m_HLTV = false;
 	m_Connected = false;
 	m_Client = nullptr;
+}
+
+void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate)
+{
+	if (numSamples <= 0 || pcm16 == nullptr)
+		return;
+
+	// If file not open or sample rate changed, start a new file
+	if (!m_WavFile || m_WavSampleRate != sampleRate) {
+		// Close previous if any
+		CloseWavIfOpen();
+
+		char auth[128] = {0};
+		size_t authLen = g_ReunionApi ? g_ReunionApi->GetClientAuthdata(m_Client->GetId(), auth, sizeof(auth) - 1) : 0;
+		if (authLen == 0) {
+			strcpy(auth, "unknown");
+		}
+		SanitizeId(auth);
+
+		time(&m_WavStartTs);
+		struct tm *tmv = localtime(&m_WavStartTs);
+		char tsbuf[32];
+		strftime(tsbuf, sizeof(tsbuf), "%Y%m%d-%H%M%S", tmv);
+
+		char filename[260];
+		snprintf(filename, sizeof(filename), "revoice_%s_%s.wav", auth, tsbuf);
+
+		m_WavFile = fopen(filename, "wb+");
+		if (!m_WavFile) {
+			return;
+		}
+		m_WavSampleRate = sampleRate;
+		m_WavDataBytes = 0;
+
+		// Reserve and write placeholder header
+		Wav_WriteHeader(m_WavFile, m_WavSampleRate, 0);
+		fseek(m_WavFile, 44, SEEK_SET);
+	}
+
+	// Append PCM data
+	size_t written = fwrite(pcm16, 2, (size_t)numSamples, m_WavFile);
+	m_WavDataBytes += (unsigned int)(written * 2);
+
+	// Update header in-place
+	long cur = ftell(m_WavFile);
+	Wav_WriteHeader(m_WavFile, m_WavSampleRate, m_WavDataBytes);
+	fseek(m_WavFile, cur, SEEK_SET);
+}
+
+void CRevoicePlayer::CloseWavIfOpen()
+{
+	if (m_WavFile) {
+		// Ensure header is up to date
+		Wav_WriteHeader(m_WavFile, m_WavSampleRate, m_WavDataBytes);
+		fclose(m_WavFile);
+		m_WavFile = nullptr;
+		m_WavDataBytes = 0;
+		m_WavSampleRate = 0;
+		m_WavStartTs = 0;
+	}
 }
 
 void CRevoicePlayer::Initialize(IGameClient *cl)
@@ -74,6 +172,7 @@ void CRevoicePlayer::OnDisconnected()
 	m_HLTV = false;
 	m_Connected = false;
 	m_Protocol = 0;
+	CloseWavIfOpen();
 	m_CodecType = vct_none;
 	m_VoiceRate = 0;
 	m_RequestId = 0;

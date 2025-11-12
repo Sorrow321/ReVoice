@@ -10,6 +10,11 @@ class CRevoicePlayer {
 private:
 	IGameClient *m_Client;
 	CodecType m_CodecType;
+	// WAV recording state
+	FILE *m_WavFile = nullptr;
+	unsigned int m_WavDataBytes = 0;
+	int m_WavSampleRate = 0;
+	time_t m_WavStartTs = 0;
 	CSteamP2PCodec *m_SilkCodec;
 	CSteamP2PCodec *m_OpusCodec;
 	VoiceCodec_Frame *m_SpeexCodec;
@@ -21,6 +26,9 @@ private:
 
 public:
 	CRevoicePlayer();
+	// WAV recording API
+	void AppendWav(const char *pcm16, int numSamples, int sampleRate);
+	void CloseWavIfOpen();
 	void Update();
 	void Initialize(IGameClient *cl);
 	void OnConnected();

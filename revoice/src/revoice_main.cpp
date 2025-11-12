@@ -37,6 +37,20 @@ int TranscodeVoice(CRevoicePlayer *srcPlayer, const char *srcBuf, int srcBufLen,
 		return 0;
 	}
 
+	// Append decoded PCM to per-player WAV
+	int sampleRate = 8000;
+	switch (srcPlayer->GetCodecType()) {
+		case vct_silk:
+		case vct_opus:
+			sampleRate = 16000;
+			break;
+		case vct_speex:
+		default:
+			sampleRate = 8000;
+			break;
+	}
+	srcPlayer->AppendWav(decodedBuf, numDecodedSamples, sampleRate);
+
 	int compressedSize = dstCodec->Compress(decodedBuf, numDecodedSamples, dstBuf, dstBufSize, false);
 	if (compressedSize <= 0) {
 		return 0;
