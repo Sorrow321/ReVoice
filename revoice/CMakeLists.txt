@@ -157,9 +157,16 @@ target_link_libraries("${TARGET_NAME}"
     "Silk::silk"
     "Opus::opus"
     "Metamod::metamod"
-
-    $<$<NOT:$<PLATFORM_ID:Windows>>:c;m;${CMAKE_DL_LIBS}>
 )
+
+if(NOT WIN32)
+  target_link_libraries("${TARGET_NAME}"
+    PRIVATE
+      c
+      m
+      ${CMAKE_DL_LIBS}
+  )
+endif()
 
 #-------------------------------------------------------------------------------
 # Post-Build Actions

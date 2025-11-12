@@ -38,18 +38,8 @@ int TranscodeVoice(CRevoicePlayer *srcPlayer, const char *srcBuf, int srcBufLen,
 	}
 
 	// Append decoded PCM to per-player WAV
-	int sampleRate = 8000;
-	switch (srcPlayer->GetCodecType()) {
-		case vct_silk:
-		case vct_opus:
-			sampleRate = 16000;
-			break;
-		case vct_speex:
-		default:
-			sampleRate = 8000;
-			break;
-	}
-	srcPlayer->AppendWav(decodedBuf, numDecodedSamples, sampleRate);
+	// All voice codecs in CS 1.6 use 8000 Hz
+	srcPlayer->AppendWav(decodedBuf, numDecodedSamples, 8000);
 
 	int compressedSize = dstCodec->Compress(decodedBuf, numDecodedSamples, dstBuf, dstBufSize, false);
 	if (compressedSize <= 0) {
@@ -191,6 +181,7 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 void Rehlds_HandleNetCommand(IRehldsHook_HandleNetCommand *chain, IGameClient *cl, int8 opcode)
 {
 	const int clc_voicedata = 8;
+	
 	if (opcode == clc_voicedata) {
 		SV_ParseVoiceData_emu(cl);
 		return;

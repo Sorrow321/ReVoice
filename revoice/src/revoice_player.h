@@ -15,6 +15,7 @@ private:
 	unsigned int m_WavDataBytes = 0;
 	int m_WavSampleRate = 0;
 	time_t m_WavStartTs = 0;
+	double m_LastWavVoiceTime = 0;
 	CSteamP2PCodec *m_SilkCodec;
 	CSteamP2PCodec *m_OpusCodec;
 	VoiceCodec_Frame *m_SpeexCodec;

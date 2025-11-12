@@ -1,6 +1,30 @@
 #include "precompiled.h"
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
 
- static void Wav_WriteHeader(FILE *f, int sampleRate, unsigned int dataBytes)
+// Helper function to create directory recursively
+static bool CreateDirectoryRecursive(const char *path) {
+	char tmp[512];
+	char *p = nullptr;
+	size_t len;
+	
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	len = strlen(tmp);
+	if (tmp[len - 1] == '/')
+		tmp[len - 1] = 0;
+	
+	for (p = tmp + 1; *p; p++) {
+		if (*p == '/') {
+			*p = 0;
+			mkdir(tmp, 0755);
+			*p = '/';
+		}
+	}
+	return mkdir(tmp, 0755) == 0 || errno == EEXIST;
+}
+
+static void Wav_WriteHeader(FILE *f, int sampleRate, unsigned int dataBytes)
 {
 	if (!f) return;
 	unsigned int riffSize = 36 + dataBytes;
@@ -69,36 +93,73 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 	if (numSamples <= 0 || pcm16 == nullptr)
 		return;
 
+	double currentTime = g_RehldsSv->GetTime();
+	
+	// If it's been more than 0.1 seconds since last voice packet, this is a new utterance
+	// Close the old file so we create a new one with fresh timestamp
+	if (m_WavFile && m_LastWavVoiceTime > 0 && (currentTime - m_LastWavVoiceTime) > 0.1) {
+		CloseWavIfOpen();
+	}
+	
+	// Update last voice time for this recording
+	m_LastWavVoiceTime = currentTime;
+
 	// If file not open or sample rate changed, start a new file
 	if (!m_WavFile || m_WavSampleRate != sampleRate) {
 		// Close previous if any
 		CloseWavIfOpen();
 
-		char auth[128] = {0};
-		size_t authLen = g_ReunionApi ? g_ReunionApi->GetClientAuthdata(m_Client->GetId(), auth, sizeof(auth) - 1) : 0;
-		if (authLen == 0) {
-			strcpy(auth, "unknown");
-		}
-		SanitizeId(auth);
+	// Get Steam ID from client
+	char auth[128] = {0};
+	USERID_t* userid = m_Client->GetNetworkUserID();
+	
+	// Check if this is a real Steam player
+	if (userid && userid->idtype == AUTH_IDTYPE_STEAM && userid->m_SteamID != 0) {
+		uint64 steamid64 = userid->m_SteamID;
+		// Convert SteamID64 to STEAM_X:Y:Z format
+		uint32 accountID = (uint32)(steamid64 & 0xFFFFFFFF);
+		uint32 Y = accountID & 1;
+		uint32 Z = accountID >> 1;
+		snprintf(auth, sizeof(auth), "STEAM_0:%u:%u", Y, Z);
+	} else if (userid && userid->clientip != 0) {
+		// Non-Steam player - use IP address
+		uint32 ip = userid->clientip;
+		snprintf(auth, sizeof(auth), "IP_%u.%u.%u.%u", 
+			(ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+	} else {
+		// Fallback if no IP available
+		snprintf(auth, sizeof(auth), "Player_%d", m_Client->GetId() + 1);
+	}
+	SanitizeId(auth);
 
-		time(&m_WavStartTs);
-		struct tm *tmv = localtime(&m_WavStartTs);
-		char tsbuf[32];
-		strftime(tsbuf, sizeof(tsbuf), "%Y%m%d-%H%M%S", tmv);
+	time(&m_WavStartTs);
+	struct tm *tmv = localtime(&m_WavStartTs);
+	char tsbuf[32];
+	strftime(tsbuf, sizeof(tsbuf), "%Y-%m-%d_%H-%M-%S", tmv);
 
-		char filename[260];
-		snprintf(filename, sizeof(filename), "revoice_%s_%s.wav", auth, tsbuf);
+	// Create directory structure: cstrike/data/STEAM_ID/
+	char dirPath[260];
+	snprintf(dirPath, sizeof(dirPath), "cstrike/data/%s", auth);
+	
+	if (!CreateDirectoryRecursive(dirPath)) {
+		return;
+	}
 
-		m_WavFile = fopen(filename, "wb+");
-		if (!m_WavFile) {
-			return;
-		}
-		m_WavSampleRate = sampleRate;
-		m_WavDataBytes = 0;
+	// Create filename: cstrike/data/STEAM_ID/YYYY-MM-DD_HH-MM-SS.wav
+	char filename[260];
+	snprintf(filename, sizeof(filename), "%s/%s.wav", dirPath, tsbuf);
 
-		// Reserve and write placeholder header
-		Wav_WriteHeader(m_WavFile, m_WavSampleRate, 0);
-		fseek(m_WavFile, 44, SEEK_SET);
+	m_WavFile = fopen(filename, "wb+");
+	if (!m_WavFile) {
+		return;
+	}
+	
+	m_WavSampleRate = sampleRate;
+	m_WavDataBytes = 0;
+
+	// Reserve and write placeholder header
+	Wav_WriteHeader(m_WavFile, m_WavSampleRate, 0);
+	fseek(m_WavFile, 44, SEEK_SET);
 	}
 
 	// Append PCM data
@@ -121,6 +182,7 @@ void CRevoicePlayer::CloseWavIfOpen()
 		m_WavDataBytes = 0;
 		m_WavSampleRate = 0;
 		m_WavStartTs = 0;
+		m_LastWavVoiceTime = 0;
 	}
 }
 
