@@ -198,9 +198,37 @@ qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char
 	RETURN_META_VALUE(MRES_IGNORED, TRUE);
 }
 
+void ClientCommand_PreHook(edict_t *pEntity)
+{
+	const char* cmd = CMD_ARGV(0);
+	
+	if (cmd && _stricmp(cmd, "playvoice") == 0) {
+		// Handle playvoice command
+		Cmd_PlayVoice_Client(pEntity);
+		RETURN_META(MRES_SUPERCEDE); // Block the command from going to the game
+	}
+	
+	RETURN_META(MRES_IGNORED);
+}
+
 void ServerActivate_PostHook(edict_t *pEdictList, int edictCount, int clientMax)
 {
 	Revoice_Exec_Config();
+	SET_META_RESULT(MRES_IGNORED);
+}
+
+void StartFrame_PreHook()
+{
+	// Run playback update early in the frame, before other networking fills datagrams.
+	// This reduces dropped voice frames (which present as volume dips / mic disappearing).
+	g_VoicePlayback.Update();
+	RETURN_META(MRES_IGNORED);
+}
+
+void StartFrame_PostHook()
+{
+	// Update voice playback system each frame
+	// (kept empty intentionally; playback is now updated in StartFrame_PreHook to reduce packet drops)
 	SET_META_RESULT(MRES_IGNORED);
 }
 
@@ -248,6 +276,7 @@ bool Revoice_Load()
 		return false;
 	}
 
+	SERVER_PRINT("[ReVoice] Voice playback system enabled\n");
 	return true;
 }
 

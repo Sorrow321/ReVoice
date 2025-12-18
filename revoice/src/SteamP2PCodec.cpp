@@ -48,12 +48,13 @@ int CSteamP2PCodec::StreamDecode(const char *pCompressed, int compressedBytes, c
 				break;
 			}
 			// Voice payload
-			case PLT_Silk: // silk deprecated
-			case PLT_OPUS: // opus deprecated
-			{
-				break;
-			}
-			case PLT_OPUS_PLC: // opus plc
+			// Note: Some clients/servers use different opcodes for the same "framed payload" format.
+			// In all of these cases the stream layout is:
+			//   [opcode][uint16 len][len bytes payload]
+			// and payload decoding is performed by the backend codec.
+			case PLT_Silk:
+			case PLT_OPUS:
+			case PLT_OPUS_PLC:
 			{
 				if (readPos + 2 > maxReadPos) {
 					return 0;
@@ -90,10 +91,13 @@ int CSteamP2PCodec::StreamEncode(const char *pUncompressedBytes, int nSamples, c
 	}
 
 	*(writePos++) = PLT_SamplingRate; // Set sampling rate
-	*(uint16 *)writePos = 16000;
+	// ReVoice encoders in this repo operate on 8 kHz PCM (see VoiceEncoder_Opus, VoiceEncoder_Silk, VoiceEncoder_Speex).
+	*(uint16 *)writePos = 8000;
 	writePos += 2;
 
-	*(writePos++) = PLT_Silk; // Voice payload
+	// Use a framed payload opcode that our decoder handles robustly (len-prefixed).
+	// This keeps compatibility across clients that might label framed payloads differently.
+	*(writePos++) = PLT_OPUS_PLC;
 
 	int compressRes = m_BackendCodec->Compress(pUncompressedBytes, nSamples, writePos + 2, maxCompressedBytes - (1 + 2 + 1 + 2), bFinal);
 	if (compressRes == 0) {

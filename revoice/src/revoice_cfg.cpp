@@ -34,10 +34,14 @@ bool Revoice_Init_Config()
 
 cvar_t g_cv_rev_hltv_codec    = { "REV_HltvCodec", "opus", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_default_codec = { "REV_DefaultCodec", "speex", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_record_voice  = { "REV_RecordVoice", "0", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_playback_debug = { "REV_PlaybackDebug", "0", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_version       = { "revoice_version", APP_VERSION, FCVAR_SERVER, 0.0f, nullptr };
 
 cvar_t *g_pcv_rev_hltv_codec    = nullptr;
 cvar_t *g_pcv_rev_default_codec = nullptr;
+cvar_t *g_pcv_rev_record_voice  = nullptr;
+cvar_t *g_pcv_rev_playback_debug = nullptr;
 cvar_t *g_pcv_sv_voiceenable    = nullptr;
 
 void Revoice_Init_Cvars()
@@ -47,13 +51,20 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_version);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_hltv_codec);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_default_codec);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_record_voice);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_debug);
 
 	g_pcv_sv_voiceenable = g_engfuncs.pfnCVarGetPointer("sv_voiceenable");
 	g_pcv_rev_hltv_codec = g_engfuncs.pfnCVarGetPointer(g_cv_rev_hltv_codec.name);
 	g_pcv_rev_default_codec = g_engfuncs.pfnCVarGetPointer(g_cv_rev_default_codec.name);
+	g_pcv_rev_record_voice = g_engfuncs.pfnCVarGetPointer(g_cv_rev_record_voice.name);
+	g_pcv_rev_playback_debug = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_debug.name);
 
 	g_RehldsFuncs->AddCvarListener(g_cv_rev_hltv_codec.name, Revoice_Update_Hltv);
 	g_RehldsFuncs->AddCvarListener(g_cv_rev_default_codec.name, Revoice_Update_Players);
+	
+	// Initialize voice playback system
+	Revoice_VoicePlayback_Init();
 }
 
 void Revoice_DeInit_Cvars()

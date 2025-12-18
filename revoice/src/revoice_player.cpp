@@ -93,6 +93,10 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 	if (numSamples <= 0 || pcm16 == nullptr)
 		return;
 
+	// Check if voice recording is enabled
+	if (!g_pcv_rev_record_voice || g_pcv_rev_record_voice->value == 0.0f)
+		return;
+
 	double currentTime = g_RehldsSv->GetTime();
 	
 	// If it's been more than 0.1 seconds since last voice packet, this is a new utterance

@@ -48,17 +48,17 @@ DLL_FUNCTIONS g_DLLFuncTable =
 	NULL,					// pfnSaveGlobalState
 	NULL,					// pfnRestoreGlobalState
 	NULL,					// pfnResetGlobalState
-	&ClientConnect_PreHook,					// pfnClientDisconnect
+	&ClientConnect_PreHook,					// pfnClientConnect
 	NULL,					// pfnClientDisconnect
 	NULL,					// pfnClientKill
 	NULL,					// pfnClientPutInServer
-	NULL,					// pfnClientCommand
+	&ClientCommand_PreHook,					// pfnClientCommand
 	NULL,					// pfnClientUserInfoChanged
 	NULL,					// pfnServerActivate
 	NULL,					// pfnServerDeactivate
 	NULL,					// pfnPlayerPreThink
 	NULL,					// pfnPlayerPostThink
-	NULL,					// pfnStartFrame
+	&StartFrame_PreHook,					// pfnStartFrame
 	NULL,					// pfnParmsNewLevel
 	NULL,					// pfnParmsChangeLevel
 	NULL,					// pfnGetGameDescription

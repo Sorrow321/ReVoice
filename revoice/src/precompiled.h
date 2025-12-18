@@ -25,6 +25,7 @@
 #include "SteamP2PCodec.h"
 #include "revoice_player.h"
 #include "revoice_main.h"
+#include "revoice_voice_playback.h"
 
 #include <rehlsdk/public/interface.h>
 #include "utlbuffer.h"
