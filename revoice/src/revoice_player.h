@@ -24,6 +24,11 @@ private:
 	int m_RequestId;
 	bool m_Connected;
 	bool m_HLTV;
+	float m_VoiceVolume;
+	float m_VoicePitch;
+	float m_PitchPhase;
+	short m_PitchPrevSample;
+	bool m_PitchHasPrev;
 
 public:
 	CRevoicePlayer();
@@ -40,6 +45,17 @@ public:
 	void IncreaseVoiceRate(int dataLength);
 	CodecType GetCodecTypeByString(const char *codec);
 	const char *GetCodecTypeToString();
+
+	void SetVoiceVolume(float volume);
+	float GetVoiceVolume() const { return m_VoiceVolume; }
+	void SetVoicePitch(float pitch);
+	float GetVoicePitch() const { return m_VoicePitch; }
+	void ResetPitchState();
+	void SetPitchPhase(float phase) { m_PitchPhase = phase; }
+	float GetPitchPhase() const { return m_PitchPhase; }
+	void SetPitchPrevSample(short s, bool has) { m_PitchPrevSample = s; m_PitchHasPrev = has; }
+	short GetPitchPrevSample() const { return m_PitchPrevSample; }
+	bool HasPitchPrev() const { return m_PitchHasPrev; }
 
 	int GetProtocol()  const { return m_Protocol;  }
 	int GetVoiceRate() const { return m_VoiceRate; }

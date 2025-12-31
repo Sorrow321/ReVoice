@@ -86,6 +86,9 @@ CRevoicePlayer::CRevoicePlayer()
 	m_HLTV = false;
 	m_Connected = false;
 	m_Client = nullptr;
+	m_VoiceVolume = 1.0f;
+	m_VoicePitch = 1.0f;
+	ResetPitchState();
 }
 
 void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate)
@@ -216,6 +219,9 @@ void CRevoicePlayer::OnConnected()
 	m_SilkCodec->ResetState();
 	m_OpusCodec->ResetState();
 	m_SpeexCodec->ResetState();
+	m_VoiceVolume = 1.0f;
+	m_VoicePitch = 1.0f;
+	ResetPitchState();
 
 	// default codec
 	m_CodecType = GetCodecTypeByString(g_pcv_rev_default_codec->string);
@@ -238,6 +244,9 @@ void CRevoicePlayer::OnDisconnected()
 	m_HLTV = false;
 	m_Connected = false;
 	m_Protocol = 0;
+	m_VoiceVolume = 1.0f;
+	m_VoicePitch = 1.0f;
+	ResetPitchState();
 	CloseWavIfOpen();
 	m_CodecType = vct_none;
 	m_VoiceRate = 0;
@@ -357,4 +366,26 @@ CodecType CRevoicePlayer::GetCodecTypeByString(const char *codec)
 #undef REV_CODEC
 
 	return vct_none;
+}
+
+void CRevoicePlayer::SetVoiceVolume(float volume)
+{
+	if (volume < 0.0f) volume = 0.0f;
+	if (volume > 10.0f) volume = 10.0f;
+	m_VoiceVolume = volume;
+}
+
+void CRevoicePlayer::SetVoicePitch(float pitch)
+{
+	// Clamp to a reasonable range to avoid buffer overruns and extreme artifacts.
+	if (pitch < 0.8f) pitch = 0.8f;
+	if (pitch > 1.2f) pitch = 1.2f;
+	m_VoicePitch = pitch;
+}
+
+void CRevoicePlayer::ResetPitchState()
+{
+	m_PitchPhase = 0.0f;
+	m_PitchPrevSample = 0;
+	m_PitchHasPrev = false;
 }

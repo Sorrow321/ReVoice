@@ -36,12 +36,30 @@ cvar_t g_cv_rev_hltv_codec    = { "REV_HltvCodec", "opus", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_default_codec = { "REV_DefaultCodec", "speex", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_record_voice  = { "REV_RecordVoice", "0", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_debug = { "REV_PlaybackDebug", "0", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_playback_frame_ms = { "REV_PlaybackFrameMs", "40", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_playback_reset_frames = { "REV_PlaybackResetFrames", "0", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_playback_reset_gap_ms = { "REV_PlaybackResetGapMs", "0", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_opus_bitrate = { "REV_OpusBitrate", "64000", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_opus_complexity = { "REV_OpusComplexity", "10", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_playback_lp_hz = { "REV_PlaybackLowpassHz", "3800", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_playvoice_client = { "REV_PlayvoiceClient", "1", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_playback_bot_name = { "REV_PlaybackBotName", "vk.com/laguna_games", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_voicecmd_verbose = { "REV_VoiceCmdVerbose", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_version       = { "revoice_version", APP_VERSION, FCVAR_SERVER, 0.0f, nullptr };
 
 cvar_t *g_pcv_rev_hltv_codec    = nullptr;
 cvar_t *g_pcv_rev_default_codec = nullptr;
 cvar_t *g_pcv_rev_record_voice  = nullptr;
 cvar_t *g_pcv_rev_playback_debug = nullptr;
+cvar_t *g_pcv_rev_playback_frame_ms = nullptr;
+cvar_t *g_pcv_rev_playback_reset_frames = nullptr;
+cvar_t *g_pcv_rev_playback_reset_gap_ms = nullptr;
+cvar_t *g_pcv_rev_opus_bitrate = nullptr;
+cvar_t *g_pcv_rev_opus_complexity = nullptr;
+cvar_t *g_pcv_rev_playback_lp_hz = nullptr;
+cvar_t *g_pcv_rev_playvoice_client = nullptr;
+cvar_t *g_pcv_rev_playback_bot_name = nullptr;
+cvar_t *g_pcv_rev_voicecmd_verbose = nullptr;
 cvar_t *g_pcv_sv_voiceenable    = nullptr;
 
 void Revoice_Init_Cvars()
@@ -53,12 +71,30 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_default_codec);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_record_voice);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_debug);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_frame_ms);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_reset_frames);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_reset_gap_ms);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_opus_bitrate);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_opus_complexity);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_lp_hz);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playvoice_client);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_bot_name);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_voicecmd_verbose);
 
 	g_pcv_sv_voiceenable = g_engfuncs.pfnCVarGetPointer("sv_voiceenable");
 	g_pcv_rev_hltv_codec = g_engfuncs.pfnCVarGetPointer(g_cv_rev_hltv_codec.name);
 	g_pcv_rev_default_codec = g_engfuncs.pfnCVarGetPointer(g_cv_rev_default_codec.name);
 	g_pcv_rev_record_voice = g_engfuncs.pfnCVarGetPointer(g_cv_rev_record_voice.name);
 	g_pcv_rev_playback_debug = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_debug.name);
+	g_pcv_rev_playback_frame_ms = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_frame_ms.name);
+	g_pcv_rev_playback_reset_frames = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_reset_frames.name);
+	g_pcv_rev_playback_reset_gap_ms = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_reset_gap_ms.name);
+	g_pcv_rev_opus_bitrate = g_engfuncs.pfnCVarGetPointer(g_cv_rev_opus_bitrate.name);
+	g_pcv_rev_opus_complexity = g_engfuncs.pfnCVarGetPointer(g_cv_rev_opus_complexity.name);
+	g_pcv_rev_playback_lp_hz = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_lp_hz.name);
+	g_pcv_rev_playvoice_client = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playvoice_client.name);
+	g_pcv_rev_playback_bot_name = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_bot_name.name);
+	g_pcv_rev_voicecmd_verbose = g_engfuncs.pfnCVarGetPointer(g_cv_rev_voicecmd_verbose.name);
 
 	g_RehldsFuncs->AddCvarListener(g_cv_rev_hltv_codec.name, Revoice_Update_Hltv);
 	g_RehldsFuncs->AddCvarListener(g_cv_rev_default_codec.name, Revoice_Update_Players);

@@ -15,9 +15,14 @@ private:
 		int targetPlayerIndex;
 		double nextChunkTime;
 		bool active;
+		float volume;
+		bool targetMask[MAX_PLAYERS];
 		// Carry buffer at 8kHz mono PCM16 to feed encoders exact frame sizes (Opus/Silk/Speex stability)
 		short pcm8kCarry[8192];
 		int pcm8kCarrySamples;
+		int framesSinceReset;
+		int resetGapFramesRemaining;
+		float lowpassState;
 	};
 	
 	PlaybackState m_State;
@@ -29,7 +34,7 @@ public:
 	~CVoicePlayback();
 	
 	// Start playing a WAV file
-	bool StartPlayback(const char* filename, int playerIndex);
+	bool StartPlayback(const char* filename, int playerIndex, float volume, const bool* targetMask);
 	
 	// Stop current playback
 	void StopPlayback();
@@ -48,5 +53,6 @@ void Revoice_VoicePlayback_Init();
 
 // Command handlers
 void Cmd_PlayVoice();
+void Cmd_PlayVoice_Ex();
 void Cmd_PlayVoice_Client(edict_t* pEntity);
 

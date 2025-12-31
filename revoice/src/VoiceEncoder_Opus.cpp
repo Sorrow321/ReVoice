@@ -35,9 +35,29 @@ bool VoiceEncoder_Opus::Init(int quality)
 		return false;
 	}
 
-	opus_encoder_ctl((OpusEncoder *)m_pEncoder, OPUS_SET_BITRATE_REQUEST, m_bitrate);
+	// Allow tuning Opus settings via cvars (server-side). This is especially useful for "music streaming"
+	// via voice packets, where the default speech-oriented bitrate may be too low.
+	int bitrate = m_bitrate;
+	if (g_pcv_rev_opus_bitrate) {
+		bitrate = (int)g_pcv_rev_opus_bitrate->value;
+	}
+	if (bitrate < 6000) bitrate = 6000;
+	if (bitrate > 256000) bitrate = 256000;
+
+	int complexity = 10;
+	if (g_pcv_rev_opus_complexity) {
+		complexity = (int)g_pcv_rev_opus_complexity->value;
+	}
+	if (complexity < 0) complexity = 0;
+	if (complexity > 10) complexity = 10;
+
+	opus_encoder_ctl((OpusEncoder *)m_pEncoder, OPUS_SET_BITRATE_REQUEST, bitrate);
+	opus_encoder_ctl((OpusEncoder *)m_pEncoder, OPUS_SET_COMPLEXITY_REQUEST, complexity);
 	opus_encoder_ctl((OpusEncoder *)m_pEncoder, OPUS_SET_SIGNAL_REQUEST, OPUS_SIGNAL_VOICE);
-	opus_encoder_ctl((OpusEncoder *)m_pEncoder, OPUS_SET_DTX_REQUEST, 1);
+	// Disable DTX: for streamed playback (and even voice chat in many servers) DTX can cause
+	// periodic fade-outs / silence when the encoder decides the signal is "inactive".
+	// This project already performs its own framing; disabling DTX makes output more stable.
+	opus_encoder_ctl((OpusEncoder *)m_pEncoder, OPUS_SET_DTX_REQUEST, 0);
 
 	int decSizeBytes = opus_decoder_get_size(MAX_CHANNELS);
 	m_pDecoder = (OpusDecoder *)malloc(decSizeBytes);
@@ -129,7 +149,10 @@ int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 			int nBytes = ((pWritePosMax - pWritePos) < 0x7FFF) ? (pWritePosMax - pWritePos) : 0x7FFF;
 			int nWriteBytes = opus_encode(m_pEncoder, (const opus_int16 *)psRead, FRAME_SIZE, (unsigned char *)pWritePos, nBytes);
 
-			psRead += MAX_FRAME_SIZE;
+			// Advance by exactly one frame of PCM.
+			// psRead is a byte pointer to 16-bit mono PCM, so increment by FRAME_SIZE * BYTES_PER_SAMPLE.
+			// Using MAX_FRAME_SIZE here desynchronizes reads and causes periodic corruption over time.
+			psRead += FRAME_SIZE * BYTES_PER_SAMPLE;
 			pWritePos += nWriteBytes;
 
 			nRemainingSamples--;

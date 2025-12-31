@@ -1,1 +1,10 @@
-# [ReVoice](https://github.com/rehlds/ReVoice) [![Percentage of issues still open](http://isitmaintained.com/badge/open/rehlds/ReVoice.svg)](http://isitmaintained.com/project/rehlds/ReVoice "Percentage of issues still open") [![GitHub license](https://img.shields.io/github/license/rehlds/ReVoice.svg?longCache=true&style=flat-square)](https://github.com/rehlds/ReVoice/blob/master/LICENSE.md) [![Deprecated](https://img.shields.io/badge/status-Deprecated-red.svg?style=flat-square)](https://github.com/rehlds/ReVoice/) [![GitHub issues](https://img.shields.io/github/issues/rehlds/ReVoice.svg?longCache=true&style=flat-square)](https://github.com/rehlds/ReVoice/issues) [![GitHub forks](https://img.shields.io/github/forks/rehlds/ReVoice.svg?longCache=true&style=flat-square)](https://github.com/rehlds/ReVoice/network) [![GitHub stars](https://img.shields.io/github/stars/rehlds/ReVoice.svg?longCache=true&style=flat-square)](https://github.com/rehlds/ReVoice/stargazers)
+## ReVoicePlusPlus (add-on)
+
+This repository includes an **add-on** named **ReVoicePlusPlus** built on top of the original ReVoice Metamod plugin. The original ReVoice project, authors, and license remain unchanged; all rights and attribution belong to their respective owners. ReVoicePlusPlus is not a forked replacement—it extends the plugin with extra server-side utilities:
+
+- Record player voice to 8 kHz mono WAV files (one file per utterance).
+- Stream server-side WAV files over in-game voice (radio-bot style, no client precache).
+- Admin mic controls: server commands to adjust per-player volume and pitch.
+- Configurable verbosity and client command enablement; targeting for playback.
+
+See `README-addon.md` for setup, commands, and configuration details.

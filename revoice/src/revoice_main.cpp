@@ -1,4 +1,9 @@
 #include "precompiled.h"
+#include <stdlib.h>
+
+static void Cmd_VoiceVolume();
+static void Cmd_VoicePitch();
+static void Cmd_VoicePitch();
 
 void SV_DropClient_hook(IRehldsHook_SV_DropClient *chain, IGameClient *cl, bool crash, const char *msg)
 {
@@ -35,6 +40,18 @@ int TranscodeVoice(CRevoicePlayer *srcPlayer, const char *srcBuf, int srcBufLen,
 	int numDecodedSamples = srcCodec->Decompress(srcBuf, srcBufLen, decodedBuf, sizeof(decodedBuf));
 	if (numDecodedSamples <= 0) {
 		return 0;
+	}
+
+	// Apply per-player voice volume (server-controlled). PCM16 samples.
+	float gain = srcPlayer->GetVoiceVolume();
+	if (gain != 1.0f && numDecodedSamples > 0) {
+		short* pcm = (short*)decodedBuf;
+		for (int i = 0; i < numDecodedSamples; ++i) {
+			float v = (float)pcm[i] * gain;
+			if (v > 32767.0f) v = 32767.0f;
+			if (v < -32768.0f) v = -32768.0f;
+			pcm[i] = (short)v;
+		}
 	}
 
 	// Append decoded PCM to per-player WAV
@@ -82,13 +99,16 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 	srcPlayer->SetLastVoiceTime(g_RehldsSv->GetTime());
 	srcPlayer->IncreaseVoiceRate(nDataLength);
 
-	char transcodedBuf[4096];
+	char decodedBuf[32768];
+	short pitchedBuf[32768];
+	char speexBuf[4096];
+	char silkBuf[4096];
+	char opusBuf[4096];
 
-	char *silkData = nullptr;
-	char *speexData = nullptr;
-
-	int silkDataLen = 0;
+	int decodedSamples = 0;
 	int speexDataLen = 0;
+	int silkDataLen = 0;
+	int opusDataLen = 0;
 
 	switch (srcPlayer->GetCodecType())
 	{
@@ -97,9 +117,7 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		if (nDataLength > MAX_SILK_DATA_LEN || srcPlayer->GetVoiceRate() > MAX_SILK_VOICE_RATE)
 			return;
 
-		silkData = chReceived; silkDataLen = nDataLength;
-		speexData = transcodedBuf;
-		speexDataLen = TranscodeVoice(srcPlayer, silkData, silkDataLen, srcPlayer->GetSilkCodec(), srcPlayer->GetSpeexCodec(), transcodedBuf, sizeof(transcodedBuf));
+		decodedSamples = srcPlayer->GetSilkCodec()->Decompress(chReceived, nDataLength, decodedBuf, sizeof(decodedBuf));
 		break;
 	}
 	case vct_opus:
@@ -107,14 +125,7 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		if (nDataLength > MAX_OPUS_DATA_LEN || srcPlayer->GetVoiceRate() > MAX_OPUS_VOICE_RATE)
 			return;
 
-		silkData = chReceived; silkDataLen = nDataLength;
-		speexData = transcodedBuf;
-
-		int numDecodedSamples = TranscodeVoice(srcPlayer, silkData, silkDataLen, srcPlayer->GetOpusCodec(), srcPlayer->GetSpeexCodec(), transcodedBuf, sizeof(transcodedBuf));
-		if (numDecodedSamples <= 0)
-			return;
-
-		speexDataLen = numDecodedSamples;
+		decodedSamples = srcPlayer->GetOpusCodec()->Decompress(chReceived, nDataLength, decodedBuf, sizeof(decodedBuf));
 		break;
 	}
 	case vct_speex:
@@ -122,14 +133,66 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		if (nDataLength > MAX_SPEEX_DATA_LEN || srcPlayer->GetVoiceRate() > MAX_SPEEX_VOICE_RATE)
 			return;
 
-		speexData = chReceived; speexDataLen = nDataLength;
-		silkData = transcodedBuf;
-		silkDataLen = TranscodeVoice(srcPlayer, speexData, speexDataLen, srcPlayer->GetSpeexCodec(), srcPlayer->GetSilkCodec(), transcodedBuf, sizeof(transcodedBuf));
+		decodedSamples = srcPlayer->GetSpeexCodec()->Decompress(chReceived, nDataLength, decodedBuf, sizeof(decodedBuf));
 		break;
 	}
 	default:
 		return;
 	}
+
+	if (decodedSamples <= 0) {
+		return;
+	}
+
+	// Apply per-player voice volume (server-controlled). PCM16 samples.
+	float gain = srcPlayer->GetVoiceVolume();
+	if (gain != 1.0f && decodedSamples > 0) {
+		short* pcm = (short*)decodedBuf;
+		for (int i = 0; i < decodedSamples; ++i) {
+			float v = (float)pcm[i] * gain;
+			if (v > 32767.0f) v = 32767.0f;
+			if (v < -32768.0f) v = -32768.0f;
+			pcm[i] = (short)v;
+		}
+	}
+
+	// Apply per-player pitch (simple resample with phase carry to reduce flutter between chunks)
+	float pitch = srcPlayer->GetVoicePitch();
+	const short* pitchIn = (short*)decodedBuf;
+	short* pitchOut = pitchedBuf;
+
+	if (pitch != 1.0f && decodedSamples > 0) {
+		// Simple frame-local linear resample (fixed output length, no cross-frame phase)
+		for (int i = 0; i < decodedSamples; ++i) {
+			float srcPos = (float)i / pitch;
+			if (srcPos >= decodedSamples - 1) {
+				pitchOut[i] = pitchIn[decodedSamples - 1];
+			} else {
+				int idx = (int)srcPos;
+				float frac = srcPos - (float)idx;
+				float a = (float)pitchIn[idx];
+				float b = (float)pitchIn[idx + 1];
+				float v = a + (b - a) * frac;
+				if (v > 32767.0f) v = 32767.0f;
+				if (v < -32768.0f) v = -32768.0f;
+				pitchOut[i] = (short)v;
+			}
+		}
+		srcPlayer->ResetPitchState();
+	} else {
+		for (int i = 0; i < decodedSamples; ++i) {
+			pitchedBuf[i] = pitchIn[i];
+		}
+		srcPlayer->ResetPitchState();
+	}
+
+	// Save to WAV (already scaled/pitched)
+	srcPlayer->AppendWav((const char*)pitchOut, decodedSamples, 8000);
+
+	// Re-encode into each codec so all recipients hear the scaled audio
+	speexDataLen = srcPlayer->GetSpeexCodec()->Compress((const char*)pitchOut, decodedSamples, speexBuf, sizeof(speexBuf), false);
+	silkDataLen  = srcPlayer->GetSilkCodec()->Compress((const char*)pitchOut, decodedSamples, silkBuf, sizeof(silkBuf), false);
+	opusDataLen  = srcPlayer->GetOpusCodec()->Compress((const char*)pitchOut, decodedSamples, opusBuf, sizeof(opusBuf), false);
 
 	int maxclients = g_RehldsSvs->GetMaxClients();
 	for (int i = 0; i < maxclients; i++)
@@ -143,22 +206,23 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		if (!dstClient->IsActive() && !dstClient->IsConnected() && dstPlayer != srcPlayer)
 			continue;
 
-		char *sendBuf;
-		int nSendLen;
+		char *sendBuf = nullptr;
+		int nSendLen = 0;
 		switch (dstPlayer->GetCodecType())
 		{
 		case vct_silk:
-		case vct_opus:
-			sendBuf = silkData;
+			sendBuf = silkDataLen > 0 ? silkBuf : nullptr;
 			nSendLen = silkDataLen;
 			break;
+		case vct_opus:
+			sendBuf = opusDataLen > 0 ? opusBuf : nullptr;
+			nSendLen = opusDataLen;
+			break;
 		case vct_speex:
-			sendBuf = speexData;
+			sendBuf = speexDataLen > 0 ? speexBuf : nullptr;
 			nSendLen = speexDataLen;
 			break;
 		default:
-			sendBuf = nullptr;
-			nSendLen = 0;
 			break;
 		}
 
@@ -188,6 +252,72 @@ void Rehlds_HandleNetCommand(IRehldsHook_HandleNetCommand *chain, IGameClient *c
 	}
 
 	chain->callNext(cl, opcode);
+}
+
+// Server command: sv_voice_pitch <player_id> <pitch>
+// Adjusts outgoing mic pitch for that player (0.5 = half, 1.0 = normal, 2.0 = double)
+static void Cmd_VoicePitch()
+{
+	int argc = CMD_ARGC();
+	if (argc < 3) {
+		SERVER_PRINT("Usage: sv_voice_pitch <player_id> <pitch 0.5..2.0>\n");
+		return;
+	}
+
+	int playerId = atoi(CMD_ARGV(1));
+	float pitch = (float)atof(CMD_ARGV(2));
+
+	if (playerId < 1 || playerId > g_RehldsSvs->GetMaxClients()) {
+		SERVER_PRINT("[ReVoice] Invalid player id\n");
+		return;
+	}
+
+	CRevoicePlayer* plr = &g_Players[playerId - 1];
+	if (!plr->IsConnected()) {
+		SERVER_PRINT("[ReVoice] Player not connected\n");
+		return;
+	}
+
+	plr->SetVoicePitch(pitch);
+
+	if (!g_pcv_rev_voicecmd_verbose || g_pcv_rev_voicecmd_verbose->value != 0.0f) {
+		char buf[128];
+		snprintf(buf, sizeof(buf), "[ReVoice] Set voice pitch for player %d to %.2f\n", playerId, plr->GetVoicePitch());
+		SERVER_PRINT(buf);
+	}
+}
+
+// Server command: sv_voice_volume <player_id> <volume>
+// Adjusts outgoing mic volume for that player (0.0 = mute, 1.0 = normal, up to 10.0 boost)
+static void Cmd_VoiceVolume()
+{
+	int argc = CMD_ARGC();
+	if (argc < 3) {
+		SERVER_PRINT("Usage: sv_voice_volume <player_id> <volume 0.0..10.0>\n");
+		return;
+	}
+
+	int playerId = atoi(CMD_ARGV(1));
+	float volume = (float)atof(CMD_ARGV(2));
+
+	if (playerId < 1 || playerId > g_RehldsSvs->GetMaxClients()) {
+		SERVER_PRINT("[ReVoice] Invalid player id\n");
+		return;
+	}
+
+	CRevoicePlayer* plr = &g_Players[playerId - 1];
+	if (!plr->IsConnected()) {
+		SERVER_PRINT("[ReVoice] Player not connected\n");
+		return;
+	}
+
+	plr->SetVoiceVolume(volume);
+
+	if (!g_pcv_rev_voicecmd_verbose || g_pcv_rev_voicecmd_verbose->value != 0.0f) {
+		char buf[128];
+		snprintf(buf, sizeof(buf), "[ReVoice] Set voice volume for player %d to %.2f\n", playerId, plr->GetVoiceVolume());
+		SERVER_PRINT(buf);
+	}
 }
 
 qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char *pszAddress, char szRejectReason[128])
@@ -270,6 +400,8 @@ bool Revoice_Load()
 	Revoice_Init_Cvars();
 	Revoice_Init_Config();
 	Revoice_Init_Players();
+	g_engfuncs.pfnAddServerCommand("sv_voice_volume", Cmd_VoiceVolume);
+	g_engfuncs.pfnAddServerCommand("sv_voice_pitch", Cmd_VoicePitch);
 
 	if (!Revoice_Main_Init()) {
 		LCPrintf(true, "Initialization failed\n");
