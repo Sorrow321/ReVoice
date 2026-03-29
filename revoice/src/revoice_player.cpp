@@ -116,26 +116,18 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 		// Close previous if any
 		CloseWavIfOpen();
 
-	// Get Steam ID from client
-	char auth[128] = {0};
-	USERID_t* userid = m_Client->GetNetworkUserID();
-	
-	// Check if this is a real Steam player
-	if (userid && userid->idtype == AUTH_IDTYPE_STEAM && userid->m_SteamID != 0) {
-		uint64 steamid64 = userid->m_SteamID;
-		// Convert SteamID64 to STEAM_X:Y:Z format
-		uint32 accountID = (uint32)(steamid64 & 0xFFFFFFFF);
-		uint32 Y = accountID & 1;
-		uint32 Z = accountID >> 1;
-		snprintf(auth, sizeof(auth), "STEAM_0:%u:%u", Y, Z);
-	} else if (userid && userid->clientip != 0) {
-		// Non-Steam player - use IP address
-		uint32 ip = userid->clientip;
-		snprintf(auth, sizeof(auth), "IP_%u.%u.%u.%u", 
-			(ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+	// DEBUG: log all players by IP for now, with nickname appended
+	char auth[256] = {0};
+	const netadr_t *adr = m_Client->GetNetChan()->GetRemoteAdr();
+	const char *name = m_Client->GetName();
+	if (adr && (adr->ip[0] | adr->ip[1] | adr->ip[2] | adr->ip[3]) != 0) {
+		snprintf(auth, sizeof(auth), "IP_%u.%u.%u.%u_%s",
+			adr->ip[0], adr->ip[1], adr->ip[2], adr->ip[3],
+			name ? name : "Unknown");
 	} else {
-		// Fallback if no IP available
-		snprintf(auth, sizeof(auth), "Player_%d", m_Client->GetId() + 1);
+		snprintf(auth, sizeof(auth), "Player_%d_%s",
+			m_Client->GetId() + 1,
+			name ? name : "Unknown");
 	}
 	SanitizeId(auth);
 
