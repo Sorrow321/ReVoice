@@ -3,7 +3,7 @@
 
 static void Cmd_VoiceVolume();
 static void Cmd_VoicePitch();
-static void Cmd_VoicePitch();
+static void Cmd_AsrRecord();
 
 void SV_DropClient_hook(IRehldsHook_SV_DropClient *chain, IGameClient *cl, bool crash, const char *msg)
 {
@@ -320,6 +320,31 @@ static void Cmd_VoiceVolume()
 	}
 }
 
+static void Cmd_AsrRecord()
+{
+	int argc = CMD_ARGC();
+	if (argc < 3) {
+		SERVER_PRINT("Usage: rv_asr_record <player_id 1..32> <0|1>\n");
+		return;
+	}
+
+	int playerId = atoi(CMD_ARGV(1));
+	int enable = atoi(CMD_ARGV(2));
+
+	if (playerId < 1 || playerId > g_RehldsSvs->GetMaxClients()) {
+		SERVER_PRINT("[ReVoice] rv_asr_record: invalid player id\n");
+		return;
+	}
+
+	int idx = playerId - 1;
+	bool wasActive = g_asrActive[idx];
+	g_asrActive[idx] = (enable != 0);
+
+	if (wasActive && !g_asrActive[idx]) {
+		g_Players[idx].CloseWavIfOpen();
+	}
+}
+
 qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char *pszAddress, char szRejectReason[128])
 {
 	CRevoicePlayer *plr = GetPlayerByEdict(pEntity);
@@ -349,16 +374,20 @@ void ServerActivate_PostHook(edict_t *pEdictList, int edictCount, int clientMax)
 
 void StartFrame_PreHook()
 {
-	// Run playback update early in the frame, before other networking fills datagrams.
-	// This reduces dropped voice frames (which present as volume dips / mic disappearing).
 	g_VoicePlayback.Update();
+
+	double now = g_RehldsSv->GetTime();
+	int maxclients = g_RehldsSvs->GetMaxClients();
+	for (int i = 0; i < maxclients; i++) {
+		if (g_asrActive[i])
+			g_Players[i].FlushWavIfStale(now, 0.3);
+	}
+
 	RETURN_META(MRES_IGNORED);
 }
 
 void StartFrame_PostHook()
 {
-	// Update voice playback system each frame
-	// (kept empty intentionally; playback is now updated in StartFrame_PreHook to reduce packet drops)
 	SET_META_RESULT(MRES_IGNORED);
 }
 
@@ -402,6 +431,7 @@ bool Revoice_Load()
 	Revoice_Init_Players();
 	g_engfuncs.pfnAddServerCommand("sv_voice_volume", Cmd_VoiceVolume);
 	g_engfuncs.pfnAddServerCommand("sv_voice_pitch", Cmd_VoicePitch);
+	g_engfuncs.pfnAddServerCommand("rv_asr_record", Cmd_AsrRecord);
 
 	if (!Revoice_Main_Init()) {
 		LCPrintf(true, "Initialization failed\n");

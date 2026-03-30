@@ -54,8 +54,12 @@ static void Wav_WriteHeader(FILE *f, int sampleRate, unsigned int dataBytes)
 static void SanitizeId(char *s)
 {
 	for (; *s; ++s) {
-		if (*s == ':' || *s == '\\' || *s == '/' || *s == ' ' || *s == '"' || *s == '*'
-		 || *s == '?' || *s == '<' || *s == '>' || *s == '|')
+		unsigned char c = (unsigned char)*s;
+		if (c < 0x20 || c == 0x7F
+		 || *s == ':' || *s == '\\' || *s == '/' || *s == ' '
+		 || *s == '"' || *s == '\'' || *s == '`'
+		 || *s == '*' || *s == '?' || *s == '<' || *s == '>' || *s == '|'
+		 || *s == ';' || *s == '%' || *s == '$' || *s == '&')
 		{
 			*s = '_';
 		}
@@ -70,6 +74,7 @@ const char *CRevoicePlayer::m_szCodecType[] = {
 };
 
 CRevoicePlayer g_Players[MAX_PLAYERS];
+bool g_asrActive[MAX_PLAYERS];
 
 CRevoicePlayer::CRevoicePlayer()
 {
@@ -88,6 +93,7 @@ CRevoicePlayer::CRevoicePlayer()
 	m_Client = nullptr;
 	m_VoiceVolume = 1.0f;
 	m_VoicePitch = 1.0f;
+	m_WavFilePath[0] = '\0';
 	ResetPitchState();
 }
 
@@ -96,14 +102,14 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 	if (numSamples <= 0 || pcm16 == nullptr)
 		return;
 
-	// Check if voice recording is enabled
-	if (!g_pcv_rev_record_voice || g_pcv_rev_record_voice->value == 0.0f)
+	int clientIndex = m_Client->GetId();
+	bool asrWanted = (clientIndex >= 0 && clientIndex < MAX_PLAYERS) && g_asrActive[clientIndex];
+	bool cvarWanted = g_pcv_rev_record_voice && g_pcv_rev_record_voice->value != 0.0f;
+	if (!asrWanted && !cvarWanted)
 		return;
 
 	double currentTime = g_RehldsSv->GetTime();
 	
-	// If it's been more than 0.1 seconds since last voice packet, this is a new utterance
-	// Close the old file so we create a new one with fresh timestamp
 	if (m_WavFile && m_LastWavVoiceTime > 0 && (currentTime - m_LastWavVoiceTime) > 0.1) {
 		CloseWavIfOpen();
 	}
@@ -144,11 +150,9 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 		return;
 	}
 
-	// Create filename: cstrike/data/STEAM_ID/YYYY-MM-DD_HH-MM-SS.wav
-	char filename[260];
-	snprintf(filename, sizeof(filename), "%s/%s.wav", dirPath, tsbuf);
+	snprintf(m_WavFilePath, sizeof(m_WavFilePath), "%s/%s.wav", dirPath, tsbuf);
 
-	m_WavFile = fopen(filename, "wb+");
+	m_WavFile = fopen(m_WavFilePath, "wb+");
 	if (!m_WavFile) {
 		return;
 	}
@@ -174,7 +178,6 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 void CRevoicePlayer::CloseWavIfOpen()
 {
 	if (m_WavFile) {
-		// Ensure header is up to date
 		Wav_WriteHeader(m_WavFile, m_WavSampleRate, m_WavDataBytes);
 		fclose(m_WavFile);
 		m_WavFile = nullptr;
@@ -182,6 +185,22 @@ void CRevoicePlayer::CloseWavIfOpen()
 		m_WavSampleRate = 0;
 		m_WavStartTs = 0;
 		m_LastWavVoiceTime = 0;
+
+		int clientIndex = m_Client->GetId();
+		if (clientIndex >= 0 && clientIndex < MAX_PLAYERS && g_asrActive[clientIndex] && m_WavFilePath[0]) {
+			char cmd[512];
+			snprintf(cmd, sizeof(cmd), "rv_asr_ready %d \"%s\"\n", clientIndex + 1, m_WavFilePath);
+			g_engfuncs.pfnServerCommand(cmd);
+			g_engfuncs.pfnServerExecute();
+		}
+		m_WavFilePath[0] = '\0';
+	}
+}
+
+void CRevoicePlayer::FlushWavIfStale(double now, double timeout)
+{
+	if (m_WavFile && m_LastWavVoiceTime > 0 && (now - m_LastWavVoiceTime) > timeout) {
+		CloseWavIfOpen();
 	}
 }
 
@@ -240,6 +259,11 @@ void CRevoicePlayer::OnDisconnected()
 	m_VoicePitch = 1.0f;
 	ResetPitchState();
 	CloseWavIfOpen();
+
+	int clientIndex = m_Client->GetId();
+	if (clientIndex >= 0 && clientIndex < MAX_PLAYERS)
+		g_asrActive[clientIndex] = false;
+
 	m_CodecType = vct_none;
 	m_VoiceRate = 0;
 	m_RequestId = 0;

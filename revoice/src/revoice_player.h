@@ -16,6 +16,7 @@ private:
 	int m_WavSampleRate = 0;
 	time_t m_WavStartTs = 0;
 	double m_LastWavVoiceTime = 0;
+	char m_WavFilePath[260];
 	CSteamP2PCodec *m_SilkCodec;
 	CSteamP2PCodec *m_OpusCodec;
 	VoiceCodec_Frame *m_SpeexCodec;
@@ -35,6 +36,7 @@ public:
 	// WAV recording API
 	void AppendWav(const char *pcm16, int numSamples, int sampleRate);
 	void CloseWavIfOpen();
+	void FlushWavIfStale(double now, double timeout);
 	void Update();
 	void Initialize(IGameClient *cl);
 	void OnConnected();
@@ -74,6 +76,7 @@ public:
 };
 
 extern CRevoicePlayer g_Players[MAX_PLAYERS];
+extern bool g_asrActive[MAX_PLAYERS];
 
 CRevoicePlayer *GetPlayerByClientPtr(IGameClient *cl);
 CRevoicePlayer *GetPlayerByEdict(const edict_t *ed);
