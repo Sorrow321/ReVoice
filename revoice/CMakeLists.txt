@@ -87,6 +87,8 @@ target_sources("${TARGET_NAME}"
 	"src/VoiceEncoder_Speex.h"
 	"src/revoice_voice_playback.cpp"
 	"src/revoice_voice_playback.h"
+	"src/revoice_upload.cpp"
+	"src/revoice_upload.h"
 )
 
 if(WIN32)
@@ -166,6 +168,7 @@ if(NOT WIN32)
     PRIVATE
       c
       m
+      pthread
       ${CMAKE_DL_LIBS}
   )
 endif()

@@ -45,6 +45,7 @@ cvar_t g_cv_rev_playback_lp_hz = { "REV_PlaybackLowpassHz", "3800", 0, 0.0f, nul
 cvar_t g_cv_rev_playvoice_client = { "REV_PlayvoiceClient", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_bot_name = { "REV_PlaybackBotName", "vk.com/laguna_games", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_voicecmd_verbose = { "REV_VoiceCmdVerbose", "1", 0, 0.0f, nullptr };
+cvar_t g_cv_rev_upload_url    = { "REV_UploadURL", "", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_version       = { "revoice_version", APP_VERSION, FCVAR_SERVER, 0.0f, nullptr };
 
 cvar_t *g_pcv_rev_hltv_codec    = nullptr;
@@ -60,6 +61,7 @@ cvar_t *g_pcv_rev_playback_lp_hz = nullptr;
 cvar_t *g_pcv_rev_playvoice_client = nullptr;
 cvar_t *g_pcv_rev_playback_bot_name = nullptr;
 cvar_t *g_pcv_rev_voicecmd_verbose = nullptr;
+cvar_t *g_pcv_rev_upload_url    = nullptr;
 cvar_t *g_pcv_sv_voiceenable    = nullptr;
 
 void Revoice_Init_Cvars()
@@ -80,6 +82,7 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playvoice_client);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_bot_name);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_voicecmd_verbose);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_upload_url);
 
 	g_pcv_sv_voiceenable = g_engfuncs.pfnCVarGetPointer("sv_voiceenable");
 	g_pcv_rev_hltv_codec = g_engfuncs.pfnCVarGetPointer(g_cv_rev_hltv_codec.name);
@@ -95,6 +98,7 @@ void Revoice_Init_Cvars()
 	g_pcv_rev_playvoice_client = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playvoice_client.name);
 	g_pcv_rev_playback_bot_name = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_bot_name.name);
 	g_pcv_rev_voicecmd_verbose = g_engfuncs.pfnCVarGetPointer(g_cv_rev_voicecmd_verbose.name);
+	g_pcv_rev_upload_url = g_engfuncs.pfnCVarGetPointer(g_cv_rev_upload_url.name);
 
 	g_RehldsFuncs->AddCvarListener(g_cv_rev_hltv_codec.name, Revoice_Update_Hltv);
 	g_RehldsFuncs->AddCvarListener(g_cv_rev_default_codec.name, Revoice_Update_Players);

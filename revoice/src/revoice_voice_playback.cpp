@@ -265,9 +265,9 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 	const char* speexBuf = nullptr;
 	int speexLen = 0;
 
-	static char opusOut[4096];
-	static char silkOut[4096];
-	static char speexOut[2048];
+	static char opusOut[32768];
+	static char silkOut[32768];
+	static char speexOut[4096];
 
 	if (pcm8k && numSamples8k > 0) {
 		if (codecSrc->GetOpusCodec()) {

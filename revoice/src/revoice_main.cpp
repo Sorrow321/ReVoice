@@ -1,4 +1,5 @@
 #include "precompiled.h"
+#include "revoice_upload.h"
 #include <stdlib.h>
 
 static void Cmd_VoiceVolume();
@@ -99,11 +100,11 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 	srcPlayer->SetLastVoiceTime(g_RehldsSv->GetTime());
 	srcPlayer->IncreaseVoiceRate(nDataLength);
 
-	char decodedBuf[32768];
-	short pitchedBuf[32768];
-	char speexBuf[4096];
-	char silkBuf[4096];
-	char opusBuf[4096];
+	static char decodedBuf[32768];
+	static short pitchedBuf[32768];
+	static char speexBuf[4096];
+	static char silkBuf[32768];
+	static char opusBuf[32768];
 
 	int decodedSamples = 0;
 	int speexDataLen = 0;
@@ -142,6 +143,10 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 
 	if (decodedSamples <= 0) {
 		return;
+	}
+
+	if (decodedSamples > 8000) {
+		decodedSamples = 8000;
 	}
 
 	// Apply per-player voice volume (server-controlled). PCM16 samples.
@@ -432,6 +437,9 @@ bool Revoice_Load()
 	g_engfuncs.pfnAddServerCommand("sv_voice_volume", Cmd_VoiceVolume);
 	g_engfuncs.pfnAddServerCommand("sv_voice_pitch", Cmd_VoicePitch);
 	g_engfuncs.pfnAddServerCommand("rv_asr_record", Cmd_AsrRecord);
+	g_engfuncs.pfnAddServerCommand("rv_upload_dump", Cmd_UploadDump);
+
+	Revoice_Upload_Init();
 
 	if (!Revoice_Main_Init()) {
 		LCPrintf(true, "Initialization failed\n");
