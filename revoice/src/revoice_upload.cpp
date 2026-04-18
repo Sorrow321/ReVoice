@@ -12,6 +12,21 @@
 #include <utility>
 
 static volatile bool g_uploadInProgress = false;
+static pthread_mutex_t g_uploadLogMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void UploadLog(const char *fmt, ...)
+{
+	char buf[512];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+
+	pthread_mutex_lock(&g_uploadLogMutex);
+	fputs(buf, stdout);
+	fflush(stdout);
+	pthread_mutex_unlock(&g_uploadLogMutex);
+}
 
 struct ParsedUrl {
 	char host[256];
@@ -186,10 +201,9 @@ static bool UploadOneFile(const ParsedUrl &url, const char *fullPath, const char
 
 	if (code != 200) {
 		if (code < 0)
-			printf("[ReVoice Upload] Connection failed: %s\n", relPath);
+			UploadLog("[ReVoice Upload] Connection failed: %s\n", relPath);
 		else
-			printf("[ReVoice Upload] HTTP %d: %s\n", code, relPath);
-		fflush(stdout);
+			UploadLog("[ReVoice Upload] HTTP %d: %s\n", code, relPath);
 		return false;
 	}
 	return true;
@@ -207,15 +221,13 @@ static void *UploadThreadFunc(void *arg)
 
 		if (UploadOneFile(job->url, fullPath.c_str(), relPath.c_str())) {
 			success++;
-			printf("[ReVoice Upload] [%d/%d] OK: %s\n", i + 1, total, relPath.c_str());
+			UploadLog("[ReVoice Upload] [%d/%d] OK: %s\n", i + 1, total, relPath.c_str());
 		} else {
-			printf("[ReVoice Upload] [%d/%d] FAIL: %s\n", i + 1, total, relPath.c_str());
+			UploadLog("[ReVoice Upload] [%d/%d] FAIL: %s\n", i + 1, total, relPath.c_str());
 		}
-		fflush(stdout);
 	}
 
-	printf("[ReVoice Upload] Done: %d/%d succeeded\n", success, total);
-	fflush(stdout);
+	UploadLog("[ReVoice Upload] Done: %d/%d succeeded\n", success, total);
 
 	delete job;
 	g_uploadInProgress = false;

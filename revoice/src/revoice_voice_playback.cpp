@@ -232,28 +232,14 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 		return;
 	}
 	
-	// Choose a "codec source" player with initialized codecs.
-	// We use its codec objects for encoding (they're already Init()'d and SetClient()'d).
-	int codecSrcSlot = -1;
-	for (int i = 0; i < gpGlobals->maxClients; i++) {
-		if (!g_Players[i].IsConnected())
-			continue;
-		IGameClient* cl = g_Players[i].GetClient();
-		if (cl && cl->IsActive()) {
-			codecSrcSlot = i + 1;
-			break;
-		}
-	}
-	if (codecSrcSlot == -1) {
-		SERVER_PRINT("[ReVoice Playback] ERROR: No active player found to source codecs from\n");
-		return;
-	}
-
-	CRevoicePlayer* codecSrc = &g_Players[codecSrcSlot - 1];
+	// Use playback-owned codec instances. Previously this function borrowed a live player's
+	// codec, which caused encoder-state corruption (shared Opus overflow buffer / sequence
+	// counters) whenever that player was speaking at the same time as playback.
+	g_VoicePlayback.InitCodecs();
 
 	if (REV_PlaybackDebugVerbose())
 		REV_PlaybackDebugPrint("[ReVoice Playback] Broadcasting to all active clients (per-destination codec)\n");
-	
+
 	// Encode ONCE per codec per frame.
 	// IMPORTANT: Opus encoder embeds sequence numbers; if we encode once per recipient,
 	// each client will see huge seq gaps (looks like massive packet loss) and audio degrades badly
@@ -270,16 +256,16 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 	static char speexOut[4096];
 
 	if (pcm8k && numSamples8k > 0) {
-		if (codecSrc->GetOpusCodec()) {
-			int n = codecSrc->GetOpusCodec()->Compress((const char*)pcm8k, numSamples8k, opusOut, sizeof(opusOut), bFinal);
+		if (g_VoicePlayback.GetOpusCodec()) {
+			int n = g_VoicePlayback.GetOpusCodec()->Compress((const char*)pcm8k, numSamples8k, opusOut, sizeof(opusOut), bFinal);
 			if (n > 0) { opusBuf = opusOut; opusLen = n; }
 		}
-		if (codecSrc->GetSilkCodec()) {
-			int n = codecSrc->GetSilkCodec()->Compress((const char*)pcm8k, numSamples8k, silkOut, sizeof(silkOut), bFinal);
+		if (g_VoicePlayback.GetSilkCodec()) {
+			int n = g_VoicePlayback.GetSilkCodec()->Compress((const char*)pcm8k, numSamples8k, silkOut, sizeof(silkOut), bFinal);
 			if (n > 0) { silkBuf = silkOut; silkLen = n; }
 		}
-		if (codecSrc->GetSpeexCodec()) {
-			int n = codecSrc->GetSpeexCodec()->Compress((const char*)pcm8k, numSamples8k, speexOut, sizeof(speexOut), bFinal);
+		if (g_VoicePlayback.GetSpeexCodec()) {
+			int n = g_VoicePlayback.GetSpeexCodec()->Compress((const char*)pcm8k, numSamples8k, speexOut, sizeof(speexOut), bFinal);
 			if (n > 0) { speexBuf = speexOut; speexLen = n; }
 		}
 	}
@@ -366,12 +352,32 @@ CVoicePlayback::CVoicePlayback()
 	m_State.volume = 1.0f;
 	for (int i = 0; i < MAX_PLAYERS; i++) m_State.targetMask[i] = true;
 	m_State.lowpassState = 0.0f;
+	m_OpusCodec = nullptr;
+	m_SilkCodec = nullptr;
+	m_SpeexCodec = nullptr;
+	m_CodecsReady = false;
 	REV_ResetPlaybackVoiceQueues();
 }
 
 CVoicePlayback::~CVoicePlayback()
 {
 	StopPlayback();
+}
+
+void CVoicePlayback::InitCodecs()
+{
+	if (m_CodecsReady)
+		return;
+
+	m_SpeexCodec = new VoiceCodec_Frame(new VoiceEncoder_Speex());
+	m_SilkCodec  = new CSteamP2PCodec(new VoiceEncoder_Silk());
+	m_OpusCodec  = new CSteamP2PCodec(new VoiceEncoder_Opus());
+
+	m_SpeexCodec->Init(SPEEX_VOICE_QUALITY);
+	m_SilkCodec ->Init(SILK_VOICE_QUALITY);
+	m_OpusCodec ->Init(OPUS_VOICE_QUALITY);
+
+	m_CodecsReady = true;
 }
 
 bool CVoicePlayback::ReadWavHeader(FILE* file, int& sampleRate, int& channels, int& bitsPerSample, unsigned int& dataSize)
@@ -855,6 +861,7 @@ void Revoice_VoicePlayback_Init()
 {
 	g_engfuncs.pfnAddServerCommand("sv_playvoice", Cmd_PlayVoice);
 	g_engfuncs.pfnAddServerCommand("sv_playvoice_ex", Cmd_PlayVoice_Ex);
+	g_VoicePlayback.InitCodecs();
 	SERVER_PRINT("[ReVoice] Voice playback commands registered: sv_playvoice, playvoice\n");
 }
 

@@ -3,6 +3,7 @@
 CSteamP2PCodec::CSteamP2PCodec(IVoiceCodec *backend)
 {
 	m_BackendCodec = backend;
+	m_Client = nullptr;
 }
 
 bool CSteamP2PCodec::Init(int quality)

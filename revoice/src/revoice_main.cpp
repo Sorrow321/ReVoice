@@ -85,7 +85,7 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 	char chReceived[4096];
 	unsigned int nDataLength = g_RehldsFuncs->MSG_ReadShort();
 
-	if (nDataLength > sizeof(chReceived)) {
+	if (nDataLength == 0 || nDataLength > sizeof(chReceived)) {
 		g_RehldsFuncs->DropClient(cl, FALSE, "Invalid voice data\n");
 		return;
 	}
@@ -204,6 +204,9 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 	{
 		CRevoicePlayer *dstPlayer = &g_Players[i];
 		IGameClient *dstClient = dstPlayer->GetClient();
+
+		if (!dstClient)
+			continue;
 
 		if (!((1 << i) & cl->GetVoiceStream(0)) && dstPlayer != srcPlayer)
 			continue;

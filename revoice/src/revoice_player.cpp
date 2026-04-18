@@ -102,6 +102,9 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 	if (numSamples <= 0 || pcm16 == nullptr)
 		return;
 
+	if (!m_Client)
+		return;
+
 	int clientIndex = m_Client->GetId();
 	bool asrWanted = (clientIndex >= 0 && clientIndex < MAX_PLAYERS) && g_asrActive[clientIndex];
 	bool cvarWanted = g_pcv_rev_record_voice && g_pcv_rev_record_voice->value != 0.0f;
@@ -186,12 +189,14 @@ void CRevoicePlayer::CloseWavIfOpen()
 		m_WavStartTs = 0;
 		m_LastWavVoiceTime = 0;
 
-		int clientIndex = m_Client->GetId();
+		int clientIndex = m_Client ? m_Client->GetId() : -1;
 		if (clientIndex >= 0 && clientIndex < MAX_PLAYERS && g_asrActive[clientIndex] && m_WavFilePath[0]) {
 			char cmd[512];
 			snprintf(cmd, sizeof(cmd), "rv_asr_ready %d \"%s\"\n", clientIndex + 1, m_WavFilePath);
+			// Queue only — do NOT call pfnServerExecute() here. This function runs from inside
+			// voice / drop / frame hooks; Cbuf_Execute would drain the entire engine command buffer
+			// synchronously and re-enter game code mid-hook, which is a known crash source.
 			g_engfuncs.pfnServerCommand(cmd);
-			g_engfuncs.pfnServerExecute();
 		}
 		m_WavFilePath[0] = '\0';
 	}
@@ -260,7 +265,7 @@ void CRevoicePlayer::OnDisconnected()
 	ResetPitchState();
 	CloseWavIfOpen();
 
-	int clientIndex = m_Client->GetId();
+	int clientIndex = m_Client ? m_Client->GetId() : -1;
 	if (clientIndex >= 0 && clientIndex < MAX_PLAYERS)
 		g_asrActive[clientIndex] = false;
 

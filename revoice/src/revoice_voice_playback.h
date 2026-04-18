@@ -2,6 +2,9 @@
 
 #include "revoice_shared.h"
 
+class CSteamP2PCodec;
+class VoiceCodec_Frame;
+
 // Voice playback system for playing WAV files through voice chat
 class CVoicePlayback {
 private:
@@ -26,12 +29,26 @@ private:
 	};
 	
 	PlaybackState m_State;
-	
+
+	// Dedicated codec instances for playback. Kept separate from per-player codecs so that
+	// broadcasting playback audio does not pollute the encoder state of an actively speaking player
+	// (shared Opus/Silk encoders carry overflow buffers and sequence counters across calls).
+	CSteamP2PCodec* m_OpusCodec;
+	CSteamP2PCodec* m_SilkCodec;
+	VoiceCodec_Frame* m_SpeexCodec;
+	bool m_CodecsReady;
+
 	bool ReadWavHeader(FILE* file, int& sampleRate, int& channels, int& bitsPerSample, unsigned int& dataSize);
-	
+
 public:
 	CVoicePlayback();
 	~CVoicePlayback();
+
+	void InitCodecs();
+
+	CSteamP2PCodec* GetOpusCodec()    const { return m_OpusCodec; }
+	CSteamP2PCodec* GetSilkCodec()    const { return m_SilkCodec; }
+	VoiceCodec_Frame* GetSpeexCodec() const { return m_SpeexCodec; }
 	
 	// Start playing a WAV file
 	bool StartPlayback(const char* filename, int playerIndex, float volume, const bool* targetMask);
