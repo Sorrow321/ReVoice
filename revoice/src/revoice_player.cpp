@@ -169,7 +169,15 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 	if (!m_WavFile) {
 		return;
 	}
-	
+
+	// Capture the *purpose* of this recording at open time. The IPC to the AMXX ASR
+	// plugin must only fire for files that were actually recorded as part of an ASR
+	// check, not for files left over from cvar-mode (REV_RecordVoice) recordings.
+	// Without this, a file opened in cvar mode whose handle survives a changelevel
+	// (rehlds may not drop clients on changelevel, and FlushWavIfStale only runs for
+	// slots with g_asrActive=true) would later be IPC'd as if it were the new check's
+	// audio, leaking session-1 content into session-2 transcription.
+	m_WavForAsr = asrWanted;
 	m_WavSampleRate = sampleRate;
 	m_WavDataBytes = 0;
 
@@ -190,6 +198,7 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 		m_WavSampleRate = 0;
 		m_WavStartTs = 0;
 		m_LastWavVoiceTime = 0;
+		m_WavForAsr = false;
 		m_WavFilePath[0] = '\0';
 		return;
 	}
@@ -212,7 +221,11 @@ void CRevoicePlayer::CloseWavIfOpen()
 		m_LastWavVoiceTime = 0;
 
 		int clientIndex = m_Client ? m_Client->GetId() : -1;
-		if (clientIndex >= 0 && clientIndex < MAX_PLAYERS && g_asrActive[clientIndex] && m_WavFilePath[0]) {
+		// Gate IPC on m_WavForAsr (set at open time): only files that were actually
+		// opened during an ASR check should be sent to the AMXX side. Also require
+		// g_asrActive *now*, so a file whose check was already cancelled / completed
+		// by the time we close doesn't trigger a redundant transcription.
+		if (clientIndex >= 0 && clientIndex < MAX_PLAYERS && m_WavForAsr && g_asrActive[clientIndex] && m_WavFilePath[0]) {
 			char cmd[512];
 			snprintf(cmd, sizeof(cmd), "rv_asr_ready %d \"%s\"\n", clientIndex + 1, m_WavFilePath);
 			// Queue only — do NOT call pfnServerExecute() here. This function runs from inside
@@ -220,6 +233,7 @@ void CRevoicePlayer::CloseWavIfOpen()
 			// synchronously and re-enter game code mid-hook, which is a known crash source.
 			g_engfuncs.pfnServerCommand(cmd);
 		}
+		m_WavForAsr = false;
 		m_WavFilePath[0] = '\0';
 	}
 }
@@ -279,6 +293,19 @@ void CRevoicePlayer::OnConnected()
 
 void CRevoicePlayer::OnDisconnected()
 {
+	// Diagnostic: confirm whether SV_DropClient (and therefore this hook) fires across
+	// changelevel for this server's rehlds build. If you do `changelevel` and DO see this
+	// line per player, the engine is dropping clients normally and the cvar-mode file leak
+	// can only span a real disconnect window. If you do NOT see it, rehlds is keeping the
+	// client across maps and OnDisconnected isn't being called — which is what we suspected.
+	{
+		const char *name = (m_Client && m_Client->GetName()) ? m_Client->GetName() : "?";
+		int slot = m_Client ? (m_Client->GetId() + 1) : -1;
+		char dbg[160];
+		snprintf(dbg, sizeof(dbg), "[ASR] OnDisconnected: slot=%d name=%s\n", slot, name);
+		SERVER_PRINT(dbg);
+	}
+
 	m_HLTV = false;
 	m_Connected = false;
 	m_Protocol = 0;

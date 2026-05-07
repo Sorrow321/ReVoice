@@ -348,7 +348,11 @@ static void Cmd_AsrRecord()
 	bool wasActive = g_asrActive[idx];
 	g_asrActive[idx] = (enable != 0);
 
-	if (wasActive && !g_asrActive[idx]) {
+	// Close on ANY transition. On true→false we want to release the file so it can be
+	// uploaded; on false→true we must drop any cvar-mode file that may still be open
+	// (otherwise its content — recorded for a different purpose — could end up sent
+	// as if it were the new check's audio).
+	if (wasActive != g_asrActive[idx]) {
 		g_Players[idx].CloseWavIfOpen();
 	}
 }
@@ -386,9 +390,12 @@ void StartFrame_PreHook()
 
 	double now = g_RehldsSv->GetTime();
 	int maxclients = g_RehldsSvs->GetMaxClients();
+	// Flush stale wavs for ALL slots, not just ASR-active ones. A cvar-mode (REV_RecordVoice)
+	// recording would otherwise sit open with no idle flush — and if the client is retained
+	// across a changelevel, the stale handle survives into the next session and can leak its
+	// path into a later ASR check.
 	for (int i = 0; i < maxclients; i++) {
-		if (g_asrActive[i])
-			g_Players[i].FlushWavIfStale(now, WAV_FLUSH_GAP_SEC);
+		g_Players[i].FlushWavIfStale(now, WAV_FLUSH_GAP_SEC);
 	}
 
 	RETURN_META(MRES_IGNORED);

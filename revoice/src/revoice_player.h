@@ -17,6 +17,7 @@ private:
 	time_t m_WavStartTs = 0;
 	double m_LastWavVoiceTime = 0;
 	unsigned int m_WavSeq = 0;
+	bool m_WavForAsr = false;
 	char m_WavFilePath[260];
 	CSteamP2PCodec *m_SilkCodec;
 	CSteamP2PCodec *m_OpusCodec;
