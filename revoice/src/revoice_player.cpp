@@ -294,13 +294,14 @@ void CRevoicePlayer::OnConnected()
 void CRevoicePlayer::OnDisconnected()
 {
 	// Diagnostic: confirm whether SV_DropClient (and therefore this hook) fires across
-	// changelevel for this server's rehlds build. If you do `changelevel` and DO see this
-	// line per player, the engine is dropping clients normally and the cvar-mode file leak
-	// can only span a real disconnect window. If you do NOT see it, rehlds is keeping the
-	// client across maps and OnDisconnected isn't being called — which is what we suspected.
+	// disconnect / changelevel for this server's rehlds build. UTIL_LogPrintf goes to
+	// logs/L*.log; SERVER_PRINT goes to the live HLDS console. If neither shows up,
+	// the SV_DropClient hookchain isn't firing at all and the C++ side is leaking
+	// per-player state across reconnects (g_asrActive, m_WavFile, codecs, etc.).
 	{
 		const char *name = (m_Client && m_Client->GetName()) ? m_Client->GetName() : "?";
 		int slot = m_Client ? (m_Client->GetId() + 1) : -1;
+		UTIL_LogPrintf("[ASR] OnDisconnected: slot=%d name=%s\n", slot, name);
 		char dbg[160];
 		snprintf(dbg, sizeof(dbg), "[ASR] OnDisconnected: slot=%d name=%s\n", slot, name);
 		SERVER_PRINT(dbg);
