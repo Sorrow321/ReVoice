@@ -3,6 +3,12 @@
 #include <sys/types.h>
 #include <errno.h>
 
+// Silence threshold that ends a single WAV recording. Used both as the
+// "speech resumed after a gap" trigger inside AppendWav and as the idle
+// flush timeout in FlushWavIfStale, so the rule is consistent: any silence
+// shorter than this is treated as part of the same utterance.
+const double WAV_FLUSH_GAP_SEC = 0.8;
+
 // Helper function to create directory recursively
 static bool CreateDirectoryRecursive(const char *path) {
 	char tmp[512];
@@ -113,7 +119,7 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 
 	double currentTime = g_RehldsSv->GetTime();
 	
-	if (m_WavFile && m_LastWavVoiceTime > 0 && (currentTime - m_LastWavVoiceTime) > 0.1) {
+	if (m_WavFile && m_LastWavVoiceTime > 0 && (currentTime - m_LastWavVoiceTime) > WAV_FLUSH_GAP_SEC) {
 		CloseWavIfOpen();
 	}
 	
@@ -127,7 +133,8 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 
 	// DEBUG: log all players by IP for now, with nickname appended
 	char auth[256] = {0};
-	const netadr_t *adr = m_Client->GetNetChan()->GetRemoteAdr();
+	INetChan *nc = m_Client->GetNetChan();
+	const netadr_t *adr = nc ? nc->GetRemoteAdr() : nullptr;
 	const char *name = m_Client->GetName();
 	if (adr && (adr->ip[0] | adr->ip[1] | adr->ip[2] | adr->ip[3]) != 0) {
 		snprintf(auth, sizeof(auth), "IP_%u.%u.%u.%u_%s",
@@ -153,7 +160,10 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 		return;
 	}
 
-	snprintf(m_WavFilePath, sizeof(m_WavFilePath), "%s/%s.wav", dirPath, tsbuf);
+	// Include a monotonic per-player counter so two recordings opened in the same wall-clock
+	// second do NOT collide on filename. Without this, fopen("wb+") would truncate a file that
+	// the AMXX side may still be uploading to the ASR server (async chunked send).
+	snprintf(m_WavFilePath, sizeof(m_WavFilePath), "%s/%s_%u.wav", dirPath, tsbuf, ++m_WavSeq);
 
 	m_WavFile = fopen(m_WavFilePath, "wb+");
 	if (!m_WavFile) {
@@ -168,9 +178,21 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 	fseek(m_WavFile, 44, SEEK_SET);
 	}
 
-	// Append PCM data
+	// Append PCM data. On short write (e.g. disk full) abandon the file rather than
+	// produce a WAV whose `data` chunk size disagrees with the actual byte count — that
+	// would silently feed Whisper a truncated tail of garbage.
 	size_t written = fwrite(pcm16, 2, (size_t)numSamples, m_WavFile);
 	m_WavDataBytes += (unsigned int)(written * 2);
+	if (written != (size_t)numSamples) {
+		fclose(m_WavFile);
+		m_WavFile = nullptr;
+		m_WavDataBytes = 0;
+		m_WavSampleRate = 0;
+		m_WavStartTs = 0;
+		m_LastWavVoiceTime = 0;
+		m_WavFilePath[0] = '\0';
+		return;
+	}
 
 	// Update header in-place
 	long cur = ftell(m_WavFile);

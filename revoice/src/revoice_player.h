@@ -16,6 +16,7 @@ private:
 	int m_WavSampleRate = 0;
 	time_t m_WavStartTs = 0;
 	double m_LastWavVoiceTime = 0;
+	unsigned int m_WavSeq = 0;
 	char m_WavFilePath[260];
 	CSteamP2PCodec *m_SilkCodec;
 	CSteamP2PCodec *m_OpusCodec;
@@ -77,6 +78,7 @@ public:
 
 extern CRevoicePlayer g_Players[MAX_PLAYERS];
 extern bool g_asrActive[MAX_PLAYERS];
+extern const double WAV_FLUSH_GAP_SEC;
 
 CRevoicePlayer *GetPlayerByClientPtr(IGameClient *cl);
 CRevoicePlayer *GetPlayerByEdict(const edict_t *ed);

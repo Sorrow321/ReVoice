@@ -388,7 +388,7 @@ void StartFrame_PreHook()
 	int maxclients = g_RehldsSvs->GetMaxClients();
 	for (int i = 0; i < maxclients; i++) {
 		if (g_asrActive[i])
-			g_Players[i].FlushWavIfStale(now, 0.3);
+			g_Players[i].FlushWavIfStale(now, WAV_FLUSH_GAP_SEC);
 	}
 
 	RETURN_META(MRES_IGNORED);

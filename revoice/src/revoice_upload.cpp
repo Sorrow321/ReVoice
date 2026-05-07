@@ -118,6 +118,14 @@ static int HttpPost(const ParsedUrl &url, const char *relPath, const char *body,
 		"\r\n",
 		url.path, url.host, url.port, bodyLen, relPath);
 
+	// snprintf returns the would-be length on truncation; sending hdrLen bytes from a
+	// truncated buffer would read past the end of `header` and leak adjacent stack memory
+	// onto the wire (and likely crash). Bail out instead.
+	if (hdrLen < 0 || hdrLen >= (int)sizeof(header)) {
+		close(sockfd);
+		return -1;
+	}
+
 	if (!SendAll(sockfd, header, hdrLen) || !SendAll(sockfd, body, bodyLen)) {
 		close(sockfd);
 		return -1;
