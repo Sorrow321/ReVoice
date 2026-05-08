@@ -398,6 +398,10 @@ void StartFrame_PreHook()
 		g_Players[i].FlushWavIfStale(now, WAV_FLUSH_GAP_SEC);
 	}
 
+	// Drain any log messages queued by the upload worker thread and write them
+	// to logs/L*.log. Cheap when nothing is in flight (single mutex check + return).
+	Revoice_Upload_DrainLog();
+
 	RETURN_META(MRES_IGNORED);
 }
 

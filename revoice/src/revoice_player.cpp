@@ -160,10 +160,19 @@ void CRevoicePlayer::AppendWav(const char *pcm16, int numSamples, int sampleRate
 		return;
 	}
 
-	// Include a monotonic per-player counter so two recordings opened in the same wall-clock
-	// second do NOT collide on filename. Without this, fopen("wb+") would truncate a file that
+	// Include a per-player counter so two recordings opened in the same wall-clock second
+	// do NOT collide on filename. Without this, fopen("wb+") would truncate a file that
 	// the AMXX side may still be uploading to the ASR server (async chunked send).
-	snprintf(m_WavFilePath, sizeof(m_WavFilePath), "%s/%s_%u.wav", dirPath, tsbuf, ++m_WavSeq);
+	// Wraps at 100 to keep filenames short — collisions only matter if the same suffix
+	// re-appears within the same second AND the prior file is still in flight; at 0.8 s
+	// minimum silence between utterances, 100 utterances is ≥80 s, far longer than any
+	// upload + transcription roundtrip.
+	m_WavSeq = (m_WavSeq + 1) % 100;
+	// "M_" prefix marks the file as an in-progress recording. The upload scanner
+	// (ScanWavFiles) skips files with this prefix so it can never read a wav we are
+	// actively writing to. CloseWavIfOpen strips the prefix after fclose via an atomic
+	// rename(2), making the file visible to the next upload scan.
+	snprintf(m_WavFilePath, sizeof(m_WavFilePath), "%s/M_%s_%u.wav", dirPath, tsbuf, m_WavSeq);
 
 	m_WavFile = fopen(m_WavFilePath, "wb+");
 	if (!m_WavFile) {
@@ -219,6 +228,27 @@ void CRevoicePlayer::CloseWavIfOpen()
 		m_WavSampleRate = 0;
 		m_WavStartTs = 0;
 		m_LastWavVoiceTime = 0;
+
+		// Strip the "M_" in-progress marker so the upload scanner can pick the file up.
+		// rename(2) is atomic within the same directory on POSIX, so a concurrent
+		// ScanWavFiles can never observe a half-renamed entry. On rename failure (disk
+		// full, etc.) we keep the M_-prefixed name — the ASR plugin still reads it fine
+		// via the IPC path below; only the upload feature skips it.
+		{
+			char finalPath[260];
+			const char *lastSlash = strrchr(m_WavFilePath, '/');
+			if (lastSlash && lastSlash[1] == 'M' && lastSlash[2] == '_') {
+				size_t prefixLen = (size_t)(lastSlash - m_WavFilePath) + 1;
+				size_t tailLen = strlen(lastSlash + 3);
+				if (prefixLen + tailLen + 1 <= sizeof(finalPath)) {
+					memcpy(finalPath, m_WavFilePath, prefixLen);
+					memcpy(finalPath + prefixLen, lastSlash + 3, tailLen + 1);
+					if (rename(m_WavFilePath, finalPath) == 0) {
+						memcpy(m_WavFilePath, finalPath, prefixLen + tailLen + 1);
+					}
+				}
+			}
+		}
 
 		int clientIndex = m_Client ? m_Client->GetId() : -1;
 		// Gate IPC on m_WavForAsr (set at open time): only files that were actually

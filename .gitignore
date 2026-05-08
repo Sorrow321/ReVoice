@@ -691,3 +691,6 @@ FodyWeavers.xsd
 
 # JetBrains Rider
 *.sln.iml
+
+
+latest_receiver.py
