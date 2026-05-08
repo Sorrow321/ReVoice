@@ -330,10 +330,11 @@ static void *UploadThreadFunc(void *arg)
 	UploadJob *job = (UploadJob *)arg;
 	int total = (int)job->files.size();
 
-	// Wrap everything so a thrown std::bad_alloc (or anything else) can never
-	// leak the job pointer or leave g_uploadInProgress stuck — that would block
-	// every subsequent rv_upload_dump until process restart.
-	try {
+	// NOTE: this build runs with -fno-exceptions, so std::bad_alloc and friends
+	// would terminate the process rather than unwind the stack here. The cleanup
+	// at the bottom (delete job; g_uploadInProgress = false) therefore only needs
+	// to run on the normal-flow paths, and every early return below performs that
+	// cleanup explicitly.
 
 	UploadLog("[ReVoice Upload] Starting dump of %d files to http://%s:%s%s\n",
 		total, job->url.host, job->url.port, job->url.path);
@@ -430,12 +431,6 @@ static void *UploadThreadFunc(void *arg)
 	double percent = total > 0 ? (100.0 * confirmedCount / total) : 0.0;
 	UploadLog("[ReVoice Upload] Done: uploaded=%d/%d, confirmed=%d/%d (%.1f%%)\n",
 		uploadedCount, total, confirmedCount, total, percent);
-
-	} catch (const std::exception &e) {
-		UploadLog("[ReVoice Upload] Internal error, aborting: %s\n", e.what());
-	} catch (...) {
-		UploadLog("[ReVoice Upload] Internal error, aborting (unknown)\n");
-	}
 
 	delete job;
 	g_uploadInProgress = false;
