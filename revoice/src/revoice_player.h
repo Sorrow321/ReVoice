@@ -5,20 +5,28 @@
 #include "SteamP2PCodec.h"
 #include "VoiceEncoder_Speex.h"
 #include "voice_codec_frame.h"
+#include <vector>
+#include <stdint.h>
 
 class CRevoicePlayer {
 private:
 	IGameClient *m_Client;
 	CodecType m_CodecType;
-	// WAV recording state
-	FILE *m_WavFile = nullptr;
-	unsigned int m_WavDataBytes = 0;
-	int m_WavSampleRate = 0;
-	time_t m_WavStartTs = 0;
-	double m_LastWavVoiceTime = 0;
-	unsigned int m_WavSeq = 0;
-	bool m_WavForAsr = false;
-	char m_WavFilePath[260];
+
+	// WAV recording state — accumulator-only design.
+	// We buffer PCM in memory for the duration of one utterance, then write
+	// the file in a single fopen+fwrite+fclose at flush time. There is never
+	// a partial WAV on disk: AMXX only ever sees finalized files via the IPC
+	// fired from FlushWav, and the upload scanner cannot race the writer
+	// because the writer never owns an open FD on disk.
+	std::vector<int16_t> m_WavSamples;
+	int                  m_WavSampleRate;
+	double               m_LastWavVoiceTime;
+	time_t               m_WavStartTs;
+	unsigned int         m_WavSeq;
+	bool                 m_WavForAsr;
+	char                 m_WavAuth[256];      // captured at start of each utterance
+
 	CSteamP2PCodec *m_SilkCodec;
 	CSteamP2PCodec *m_OpusCodec;
 	VoiceCodec_Frame *m_SpeexCodec;
@@ -27,18 +35,16 @@ private:
 	int m_RequestId;
 	bool m_Connected;
 	bool m_HLTV;
-	float m_VoiceVolume;
-	float m_VoicePitch;
-	float m_PitchPhase;
-	short m_PitchPrevSample;
-	bool m_PitchHasPrev;
 
 public:
 	CRevoicePlayer();
+
 	// WAV recording API
-	void AppendWav(const char *pcm16, int numSamples, int sampleRate);
-	void CloseWavIfOpen();
-	void FlushWavIfStale(double now, double timeout);
+	void AppendPcm(const char *pcm16, int numSamples, int sampleRate);  // buffer PCM in memory
+	void FlushWav(const char *reason);                   // write buffered PCM to disk (no-op if empty)
+	void FlushWavIfStale(double now, double timeout);    // flush if silence-gap exceeded
+	size_t GetBufferSamples() const { return m_WavSamples.size(); }
+
 	void Update();
 	void Initialize(IGameClient *cl);
 	void OnConnected();
@@ -49,17 +55,6 @@ public:
 	void IncreaseVoiceRate(int dataLength);
 	CodecType GetCodecTypeByString(const char *codec);
 	const char *GetCodecTypeToString();
-
-	void SetVoiceVolume(float volume);
-	float GetVoiceVolume() const { return m_VoiceVolume; }
-	void SetVoicePitch(float pitch);
-	float GetVoicePitch() const { return m_VoicePitch; }
-	void ResetPitchState();
-	void SetPitchPhase(float phase) { m_PitchPhase = phase; }
-	float GetPitchPhase() const { return m_PitchPhase; }
-	void SetPitchPrevSample(short s, bool has) { m_PitchPrevSample = s; m_PitchHasPrev = has; }
-	short GetPitchPrevSample() const { return m_PitchPrevSample; }
-	bool HasPitchPrev() const { return m_PitchHasPrev; }
 
 	int GetProtocol()  const { return m_Protocol;  }
 	int GetVoiceRate() const { return m_VoiceRate; }
@@ -85,5 +80,10 @@ CRevoicePlayer *GetPlayerByClientPtr(IGameClient *cl);
 CRevoicePlayer *GetPlayerByEdict(const edict_t *ed);
 
 void Revoice_Init_Players();
+void Revoice_FlushAll_Players();        // called on changelevel / shutdown
 void Revoice_Update_Players(const char *pszNewValue);
 void Revoice_Update_Hltv(const char *pszNewValue);
+
+// Periodic state snapshot to RV*.log. Call from StartFrame_PreHook; the
+// function rate-limits itself to one line per ~30 wall-clock seconds.
+void Revoice_LogHeartbeatTick();

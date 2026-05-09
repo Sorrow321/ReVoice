@@ -55,7 +55,7 @@ DLL_FUNCTIONS g_DLLFuncTable =
 	&ClientCommand_PreHook,					// pfnClientCommand
 	NULL,					// pfnClientUserInfoChanged
 	NULL,					// pfnServerActivate
-	NULL,					// pfnServerDeactivate
+	&ServerDeactivate_PreHook,					// pfnServerDeactivate
 	NULL,					// pfnPlayerPreThink
 	NULL,					// pfnPlayerPostThink
 	&StartFrame_PreHook,					// pfnStartFrame

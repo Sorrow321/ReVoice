@@ -32,3 +32,4 @@ extern cvar_t *g_pcv_rev_playvoice_client;
 extern cvar_t *g_pcv_rev_playback_bot_name;
 extern cvar_t *g_pcv_rev_voicecmd_verbose;
 extern cvar_t *g_pcv_rev_upload_url;
+extern cvar_t *g_pcv_rev_debug_log;     // 1 = write RVYYYYMMDD.log diagnostics; 0 = silence

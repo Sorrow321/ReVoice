@@ -11,6 +11,7 @@ void CvarValue2_PreHook(const edict_t *pEnt, int requestID, const char *cvarName
 qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char *pszAddress, char szRejectReason[128]);
 void ClientCommand_PreHook(edict_t *pEntity);
 void ServerActivate_PostHook(edict_t *pEdictList, int edictCount, int clientMax);
+void ServerDeactivate_PreHook();
 void StartFrame_PreHook();
 void StartFrame_PostHook();
 

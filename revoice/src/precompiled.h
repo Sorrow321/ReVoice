@@ -26,6 +26,7 @@
 #include "revoice_player.h"
 #include "revoice_main.h"
 #include "revoice_voice_playback.h"
+#include "revoice_log.h"
 
 #include <rehlsdk/public/interface.h>
 #include "utlbuffer.h"

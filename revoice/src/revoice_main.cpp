@@ -1,13 +1,25 @@
 #include "precompiled.h"
-#include "revoice_upload.h"
+// Upload subsystem temporarily disabled while we isolate the wav-save + ASR
+// crash. The header is not included so any accidental call to
+// Revoice_Upload_DrainLog / Cmd_UploadDump etc. fails to compile rather
+// than silently re-introducing the disabled path.
+// #include "revoice_upload.h"
 #include <stdlib.h>
 
-static void Cmd_VoiceVolume();
-static void Cmd_VoicePitch();
+// Server-cmd handlers temporarily disabled to isolate the wav-save + ASR path:
+//   - sv_voice_volume / sv_voice_pitch (per-player gain & pitch)
+//   - rv_upload_dump (HTTP dumper to external server)
+// rv_asr_record stays registered (it is a debugged subject).
+// static void Cmd_VoiceVolume();
+// static void Cmd_VoicePitch();
 static void Cmd_AsrRecord();
 
 void SV_DropClient_hook(IRehldsHook_SV_DropClient *chain, IGameClient *cl, bool crash, const char *msg)
 {
+	int slot = cl ? cl->GetId() : -1;
+	RvLog("[HOOK] SV_DropClient slot=%d crash=%d msg=%s",
+		slot, crash ? 1 : 0, msg ? msg : "(null)");
+
 	CRevoicePlayer *plr = GetPlayerByClientPtr(cl);
 
 	plr->OnDisconnected();
@@ -34,6 +46,15 @@ void CvarValue2_PreHook(const edict_t *pEnt, int requestID, const char *cvarName
 	RETURN_META(MRES_IGNORED);
 }
 
+// Restored to the original ReVoice transcoding shape: decode once with the
+// source codec, append PCM to the player's wav buffer, encode once into the
+// "complementary" codec (speex<->silk/opus). Each destination then gets
+// whichever of the two pre-encoded buffers matches its preferred codec.
+//
+// The recently-added "triple-encode + per-player gain + per-player pitch"
+// path is intentionally absent here while we isolate the wav-save + ASR
+// crash. Restoring it requires re-introducing this function's body and
+// the corresponding code in SV_ParseVoiceData_emu.
 int TranscodeVoice(CRevoicePlayer *srcPlayer, const char *srcBuf, int srcBufLen, IVoiceCodec *srcCodec, IVoiceCodec *dstCodec, char *dstBuf, int dstBufSize)
 {
 	char decodedBuf[32768];
@@ -43,39 +64,13 @@ int TranscodeVoice(CRevoicePlayer *srcPlayer, const char *srcBuf, int srcBufLen,
 		return 0;
 	}
 
-	// Apply per-player voice volume (server-controlled). PCM16 samples.
-	float gain = srcPlayer->GetVoiceVolume();
-	if (gain != 1.0f && numDecodedSamples > 0) {
-		short* pcm = (short*)decodedBuf;
-		for (int i = 0; i < numDecodedSamples; ++i) {
-			float v = (float)pcm[i] * gain;
-			if (v > 32767.0f) v = 32767.0f;
-			if (v < -32768.0f) v = -32768.0f;
-			pcm[i] = (short)v;
-		}
-	}
-
-	// Append decoded PCM to per-player WAV
-	// All voice codecs in CS 1.6 use 8000 Hz
-	srcPlayer->AppendWav(decodedBuf, numDecodedSamples, 8000);
+	// All voice codecs in CS 1.6 produce 8 kHz PCM16.
+	srcPlayer->AppendPcm(decodedBuf, numDecodedSamples, 8000);
 
 	int compressedSize = dstCodec->Compress(decodedBuf, numDecodedSamples, dstBuf, dstBufSize, false);
 	if (compressedSize <= 0) {
 		return 0;
 	}
-
-	/*
-	int numDecodedSamples2 = dstCodec->Decompress(dstBuf, compressedSize, decodedBuf, sizeof(decodedBuf));
-	if (numDecodedSamples2 <= 0) {
-		return compressedSize;
-	}
-
-	FILE *rawSndFile = fopen("d:\\revoice_raw.snd", "ab");
-	if (rawSndFile) {
-		fwrite(decodedBuf, 2, numDecodedSamples2, rawSndFile);
-		fclose(rawSndFile);
-	}
-	*/
 
 	return compressedSize;
 }
@@ -100,16 +95,13 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 	srcPlayer->SetLastVoiceTime(g_RehldsSv->GetTime());
 	srcPlayer->IncreaseVoiceRate(nDataLength);
 
-	static char decodedBuf[32768];
-	static short pitchedBuf[32768];
-	static char speexBuf[4096];
-	static char silkBuf[32768];
-	static char opusBuf[32768];
+	char transcodedBuf[4096];
 
-	int decodedSamples = 0;
-	int speexDataLen = 0;
+	char *silkData = nullptr;
+	char *speexData = nullptr;
+
 	int silkDataLen = 0;
-	int opusDataLen = 0;
+	int speexDataLen = 0;
 
 	switch (srcPlayer->GetCodecType())
 	{
@@ -118,7 +110,9 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		if (nDataLength > MAX_SILK_DATA_LEN || srcPlayer->GetVoiceRate() > MAX_SILK_VOICE_RATE)
 			return;
 
-		decodedSamples = srcPlayer->GetSilkCodec()->Decompress(chReceived, nDataLength, decodedBuf, sizeof(decodedBuf));
+		silkData = chReceived; silkDataLen = nDataLength;
+		speexData = transcodedBuf;
+		speexDataLen = TranscodeVoice(srcPlayer, silkData, silkDataLen, srcPlayer->GetSilkCodec(), srcPlayer->GetSpeexCodec(), transcodedBuf, sizeof(transcodedBuf));
 		break;
 	}
 	case vct_opus:
@@ -126,7 +120,9 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		if (nDataLength > MAX_OPUS_DATA_LEN || srcPlayer->GetVoiceRate() > MAX_OPUS_VOICE_RATE)
 			return;
 
-		decodedSamples = srcPlayer->GetOpusCodec()->Decompress(chReceived, nDataLength, decodedBuf, sizeof(decodedBuf));
+		silkData = chReceived; silkDataLen = nDataLength;
+		speexData = transcodedBuf;
+		speexDataLen = TranscodeVoice(srcPlayer, silkData, silkDataLen, srcPlayer->GetOpusCodec(), srcPlayer->GetSpeexCodec(), transcodedBuf, sizeof(transcodedBuf));
 		break;
 	}
 	case vct_speex:
@@ -134,70 +130,14 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		if (nDataLength > MAX_SPEEX_DATA_LEN || srcPlayer->GetVoiceRate() > MAX_SPEEX_VOICE_RATE)
 			return;
 
-		decodedSamples = srcPlayer->GetSpeexCodec()->Decompress(chReceived, nDataLength, decodedBuf, sizeof(decodedBuf));
+		speexData = chReceived; speexDataLen = nDataLength;
+		silkData = transcodedBuf;
+		silkDataLen = TranscodeVoice(srcPlayer, speexData, speexDataLen, srcPlayer->GetSpeexCodec(), srcPlayer->GetSilkCodec(), transcodedBuf, sizeof(transcodedBuf));
 		break;
 	}
 	default:
 		return;
 	}
-
-	if (decodedSamples <= 0) {
-		return;
-	}
-
-	if (decodedSamples > 8000) {
-		decodedSamples = 8000;
-	}
-
-	// Apply per-player voice volume (server-controlled). PCM16 samples.
-	float gain = srcPlayer->GetVoiceVolume();
-	if (gain != 1.0f && decodedSamples > 0) {
-		short* pcm = (short*)decodedBuf;
-		for (int i = 0; i < decodedSamples; ++i) {
-			float v = (float)pcm[i] * gain;
-			if (v > 32767.0f) v = 32767.0f;
-			if (v < -32768.0f) v = -32768.0f;
-			pcm[i] = (short)v;
-		}
-	}
-
-	// Apply per-player pitch (simple resample with phase carry to reduce flutter between chunks)
-	float pitch = srcPlayer->GetVoicePitch();
-	const short* pitchIn = (short*)decodedBuf;
-	short* pitchOut = pitchedBuf;
-
-	if (pitch != 1.0f && decodedSamples > 0) {
-		// Simple frame-local linear resample (fixed output length, no cross-frame phase)
-		for (int i = 0; i < decodedSamples; ++i) {
-			float srcPos = (float)i / pitch;
-			if (srcPos >= decodedSamples - 1) {
-				pitchOut[i] = pitchIn[decodedSamples - 1];
-			} else {
-				int idx = (int)srcPos;
-				float frac = srcPos - (float)idx;
-				float a = (float)pitchIn[idx];
-				float b = (float)pitchIn[idx + 1];
-				float v = a + (b - a) * frac;
-				if (v > 32767.0f) v = 32767.0f;
-				if (v < -32768.0f) v = -32768.0f;
-				pitchOut[i] = (short)v;
-			}
-		}
-		srcPlayer->ResetPitchState();
-	} else {
-		for (int i = 0; i < decodedSamples; ++i) {
-			pitchedBuf[i] = pitchIn[i];
-		}
-		srcPlayer->ResetPitchState();
-	}
-
-	// Save to WAV (already scaled/pitched)
-	srcPlayer->AppendWav((const char*)pitchOut, decodedSamples, 8000);
-
-	// Re-encode into each codec so all recipients hear the scaled audio
-	speexDataLen = srcPlayer->GetSpeexCodec()->Compress((const char*)pitchOut, decodedSamples, speexBuf, sizeof(speexBuf), false);
-	silkDataLen  = srcPlayer->GetSilkCodec()->Compress((const char*)pitchOut, decodedSamples, silkBuf, sizeof(silkBuf), false);
-	opusDataLen  = srcPlayer->GetOpusCodec()->Compress((const char*)pitchOut, decodedSamples, opusBuf, sizeof(opusBuf), false);
 
 	int maxclients = g_RehldsSvs->GetMaxClients();
 	for (int i = 0; i < maxclients; i++)
@@ -219,15 +159,12 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		switch (dstPlayer->GetCodecType())
 		{
 		case vct_silk:
-			sendBuf = silkDataLen > 0 ? silkBuf : nullptr;
+		case vct_opus:
+			sendBuf  = silkData;
 			nSendLen = silkDataLen;
 			break;
-		case vct_opus:
-			sendBuf = opusDataLen > 0 ? opusBuf : nullptr;
-			nSendLen = opusDataLen;
-			break;
 		case vct_speex:
-			sendBuf = speexDataLen > 0 ? speexBuf : nullptr;
+			sendBuf  = speexData;
 			nSendLen = speexDataLen;
 			break;
 		default:
@@ -253,7 +190,7 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 void Rehlds_HandleNetCommand(IRehldsHook_HandleNetCommand *chain, IGameClient *cl, int8 opcode)
 {
 	const int clc_voicedata = 8;
-	
+
 	if (opcode == clc_voicedata) {
 		SV_ParseVoiceData_emu(cl);
 		return;
@@ -262,6 +199,7 @@ void Rehlds_HandleNetCommand(IRehldsHook_HandleNetCommand *chain, IGameClient *c
 	chain->callNext(cl, opcode);
 }
 
+#if 0   // ---- BEGIN disabled: per-player pitch / volume cmds ----
 // Server command: sv_voice_pitch <player_id> <pitch>
 // Adjusts outgoing mic pitch for that player (0.5 = half, 1.0 = normal, 2.0 = double)
 static void Cmd_VoicePitch()
@@ -327,6 +265,7 @@ static void Cmd_VoiceVolume()
 		SERVER_PRINT(buf);
 	}
 }
+#endif  // ---- END disabled: per-player pitch / volume cmds ----
 
 static void Cmd_AsrRecord()
 {
@@ -348,17 +287,24 @@ static void Cmd_AsrRecord()
 	bool wasActive = g_asrActive[idx];
 	g_asrActive[idx] = (enable != 0);
 
-	// Close on ANY transition. On true→false we want to release the file so it can be
-	// uploaded; on false→true we must drop any cvar-mode file that may still be open
-	// (otherwise its content — recorded for a different purpose — could end up sent
-	// as if it were the new check's audio).
+	RvLog("[ASR] cmd slot=%d enable=%d wasActive=%d transition=%d",
+		idx, enable, wasActive ? 1 : 0,
+		(wasActive != g_asrActive[idx]) ? 1 : 0);
+
+	// Flush on any transition. true→false: release the buffered check
+	// audio to AMXX. false→true: drop any cvar-mode buffer in flight so
+	// its content can't bleed into the new check's transcription.
 	if (wasActive != g_asrActive[idx]) {
-		g_Players[idx].CloseWavIfOpen();
+		g_Players[idx].FlushWav("asr-toggle");
 	}
 }
 
 qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char *pszAddress, char szRejectReason[128])
 {
+	RvLog("[HOOK] ClientConnect name=%s addr=%s",
+		pszName ? pszName : "(null)",
+		pszAddress ? pszAddress : "(null)");
+
 	CRevoicePlayer *plr = GetPlayerByEdict(pEntity);
 	plr->OnConnected();
 
@@ -367,14 +313,14 @@ qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char
 
 void ClientCommand_PreHook(edict_t *pEntity)
 {
-	const char* cmd = CMD_ARGV(0);
-	
-	if (cmd && _stricmp(cmd, "playvoice") == 0) {
-		// Handle playvoice command
-		Cmd_PlayVoice_Client(pEntity);
-		RETURN_META(MRES_SUPERCEDE); // Block the command from going to the game
-	}
-	
+	// Client-driven "playvoice" is part of the disabled playback subsystem;
+	// fall through to the game DLL untouched.
+	// const char* cmd = CMD_ARGV(0);
+	// if (cmd && _stricmp(cmd, "playvoice") == 0) {
+	//     Cmd_PlayVoice_Client(pEntity);
+	//     RETURN_META(MRES_SUPERCEDE);
+	// }
+
 	RETURN_META(MRES_IGNORED);
 }
 
@@ -384,23 +330,37 @@ void ServerActivate_PostHook(edict_t *pEdictList, int edictCount, int clientMax)
 	SET_META_RESULT(MRES_IGNORED);
 }
 
+// Map ending: drop everything still buffered for every player. Without
+// this, sv.time resets at the boundary and the silence-gap check in
+// FlushWavIfStale misfires (the "now < lastVoice" branch eventually
+// catches it on the new map, but flushing here makes the map boundary
+// clean and keeps each map's audio in its own file.)
+void ServerDeactivate_PreHook()
+{
+	RvLog("[HOOK] ServerDeactivate");
+	Revoice_FlushAll_Players();
+	SET_META_RESULT(MRES_IGNORED);
+}
+
 void StartFrame_PreHook()
 {
-	g_VoicePlayback.Update();
+	// Voice playback (bot-emitted music) — disabled while we isolate.
+	// g_VoicePlayback.Update();
 
 	double now = g_RehldsSv->GetTime();
 	int maxclients = g_RehldsSvs->GetMaxClients();
-	// Flush stale wavs for ALL slots, not just ASR-active ones. A cvar-mode (REV_RecordVoice)
-	// recording would otherwise sit open with no idle flush — and if the client is retained
-	// across a changelevel, the stale handle survives into the next session and can leak its
-	// path into a later ASR check.
+	// Idle flush for every slot. The per-slot accumulator returns
+	// immediately if there is nothing buffered.
 	for (int i = 0; i < maxclients; i++) {
 		g_Players[i].FlushWavIfStale(now, WAV_FLUSH_GAP_SEC);
 	}
 
-	// Drain any log messages queued by the upload worker thread and write them
-	// to logs/L*.log. Cheap when nothing is in flight (single mutex check + return).
-	Revoice_Upload_DrainLog();
+	// Periodic state snapshot to RV*.log. Self-rate-limits to ~30s.
+	Revoice_LogHeartbeatTick();
+
+	// Upload-thread log drain — disabled (no upload thread runs while
+	// rv_upload_dump is unregistered).
+	// Revoice_Upload_DrainLog();
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -448,19 +408,25 @@ bool Revoice_Load()
 	Revoice_Init_Cvars();
 	Revoice_Init_Config();
 	Revoice_Init_Players();
-	g_engfuncs.pfnAddServerCommand("sv_voice_volume", Cmd_VoiceVolume);
-	g_engfuncs.pfnAddServerCommand("sv_voice_pitch", Cmd_VoicePitch);
-	g_engfuncs.pfnAddServerCommand("rv_asr_record", Cmd_AsrRecord);
-	g_engfuncs.pfnAddServerCommand("rv_upload_dump", Cmd_UploadDump);
 
-	Revoice_Upload_Init();
+	// Disabled while we isolate the wav-save + ASR path:
+	//   g_engfuncs.pfnAddServerCommand("sv_voice_volume", Cmd_VoiceVolume);
+	//   g_engfuncs.pfnAddServerCommand("sv_voice_pitch",  Cmd_VoicePitch);
+	//   g_engfuncs.pfnAddServerCommand("rv_upload_dump",  Cmd_UploadDump);
+	g_engfuncs.pfnAddServerCommand("rv_asr_record", Cmd_AsrRecord);
+
+	// Disabled: external dumper subsystem (RecoverOrphanedRecordings is
+	// also unnecessary now — the new wav writer never produces M_*.wav
+	// orphans because no file is on disk until it is fully written).
+	// Revoice_Upload_Init();
 
 	if (!Revoice_Main_Init()) {
 		LCPrintf(true, "Initialization failed\n");
 		return false;
 	}
 
-	SERVER_PRINT("[ReVoice] Voice playback system enabled\n");
+	SERVER_PRINT("[ReVoice] WAV recording + ASR isolated mode\n");
+	RvLog("[BOOT] ReVoice loaded (WAV-save + ASR isolated build), version=%s", APP_VERSION);
 	return true;
 }
 
