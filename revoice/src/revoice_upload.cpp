@@ -440,7 +440,7 @@ static void *UploadThreadFunc(void *arg)
 void Cmd_UploadDump()
 {
 	UTIL_LogPrintf("[ReVoice Upload] rv_upload_dump invoked\n");
-
+	/*
 	if (g_uploadInProgress) {
 		UTIL_LogPrintf("[ReVoice Upload] rejected: upload already in progress\n");
 		SERVER_PRINT("[ReVoice] Upload already in progress.\n");
@@ -485,4 +485,5 @@ void Cmd_UploadDump()
 		return;
 	}
 	pthread_detach(tid);
+	*/
 }
