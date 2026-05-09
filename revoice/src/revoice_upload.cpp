@@ -40,7 +40,8 @@ static void UploadLog(const char *fmt, ...)
 }
 
 // Called from the main thread (StartFrame_PreHook). Pulls all queued messages
-// from the worker and writes them to logs/L*.log via UTIL_LogPrintf.
+// from the worker and writes them to the server console via SERVER_PRINT.
+// (UTIL_LogPrintf -> ALERT(at_logged) does not visibly echo on this build.)
 void Revoice_Upload_DrainLog()
 {
 	for (;;) {
@@ -54,7 +55,7 @@ void Revoice_Upload_DrainLog()
 		g_uploadLogQueue.pop_front();
 		pthread_mutex_unlock(&g_uploadLogMutex);
 
-		UTIL_LogPrintf("%s", msg.c_str());
+		SERVER_PRINT(msg.c_str());
 	}
 }
 
@@ -439,24 +440,25 @@ static void *UploadThreadFunc(void *arg)
 
 void Cmd_UploadDump()
 {
-	UTIL_LogPrintf("[ReVoice Upload] rv_upload_dump invoked\n");
-	/*
+	SERVER_PRINT("[ReVoice Upload] rv_upload_dump invoked\n");
+
 	if (g_uploadInProgress) {
-		UTIL_LogPrintf("[ReVoice Upload] rejected: upload already in progress\n");
-		SERVER_PRINT("[ReVoice] Upload already in progress.\n");
+		SERVER_PRINT("[ReVoice Upload] rejected: upload already in progress\n");
 		return;
 	}
 
 	if (!g_pcv_rev_upload_url || !g_pcv_rev_upload_url->string || g_pcv_rev_upload_url->string[0] == '\0') {
-		UTIL_LogPrintf("[ReVoice Upload] rejected: REV_UploadURL not set\n");
-		SERVER_PRINT("[ReVoice] REV_UploadURL not set. Example: REV_UploadURL \"http://yourserver:5000/upload\"\n");
+		SERVER_PRINT("[ReVoice Upload] rejected: REV_UploadURL not set. Example: REV_UploadURL \"http://yourserver:5000/upload\"\n");
 		return;
 	}
 
 	ParsedUrl url;
 	if (!ParseHttpUrl(g_pcv_rev_upload_url->string, url)) {
-		UTIL_LogPrintf("[ReVoice Upload] rejected: invalid REV_UploadURL '%s'\n", g_pcv_rev_upload_url->string);
-		SERVER_PRINT("[ReVoice] Invalid REV_UploadURL. Must be http://host:port/path\n");
+		char msg[512];
+		snprintf(msg, sizeof(msg),
+			"[ReVoice Upload] rejected: invalid REV_UploadURL '%s' (must be http://host:port/path)\n",
+			g_pcv_rev_upload_url->string);
+		SERVER_PRINT(msg);
 		return;
 	}
 
@@ -465,25 +467,27 @@ void Cmd_UploadDump()
 	ScanWavFiles("cstrike/data", "cstrike/data", job->files);
 
 	if (job->files.empty()) {
-		UTIL_LogPrintf("[ReVoice Upload] no WAV files found in cstrike/data/\n");
-		SERVER_PRINT("[ReVoice] No WAV files found in cstrike/data/\n");
+		SERVER_PRINT("[ReVoice Upload] no WAV files found in cstrike/data/\n");
 		delete job;
 		return;
 	}
 
-	UTIL_LogPrintf("[ReVoice Upload] queued %d files for upload to http://%s:%s%s\n",
-		(int)job->files.size(), url.host, url.port, url.path);
+	{
+		char msg[256];
+		snprintf(msg, sizeof(msg),
+			"[ReVoice Upload] queued %d files for upload to http://%s:%s%s\n",
+			(int)job->files.size(), url.host, url.port, url.path);
+		SERVER_PRINT(msg);
+	}
 
 	g_uploadInProgress = true;
 
 	pthread_t tid;
 	if (pthread_create(&tid, nullptr, UploadThreadFunc, job) != 0) {
-		UTIL_LogPrintf("[ReVoice Upload] failed to create worker thread\n");
-		SERVER_PRINT("[ReVoice] Failed to create upload thread\n");
+		SERVER_PRINT("[ReVoice Upload] failed to create worker thread\n");
 		delete job;
 		g_uploadInProgress = false;
 		return;
 	}
 	pthread_detach(tid);
-	*/
 }
