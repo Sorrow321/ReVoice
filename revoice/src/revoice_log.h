@@ -16,7 +16,7 @@
 //     input. vsnprintf with %s + a NULL pointer is undefined behaviour, so
 //     callers must guard ("name ? name : \"(null)\"").
 //
-// File path: cstrike/addons/metamod/logs/RVYYYYMMDD.log
+// File path: cstrike/addons/amxmodx/logs/RVYYYYMMDD.log
 // Line format: [HH:MM:SS.mmm sv=12.345] <message>\n
 #if defined(__GNUC__) || defined(__clang__)
 void RvLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

@@ -53,10 +53,11 @@ void RvLog(const char *fmt, ...)
 	line[totalLen + 1] = '\0';
 	totalLen += 1;  // include the '\n' in the write count
 
-	// Filename rolls daily: cstrike/addons/metamod/logs/RV20260509.log
+	// Filename rolls daily: cstrike/addons/amxmodx/logs/RV20260509.log
+	// (Using amxmodx/logs because metamod/logs is not provisioned on this host.)
 	char path[256];
 	int pathLen = snprintf(path, sizeof(path),
-		"cstrike/addons/metamod/logs/RV%04d%02d%02d.log",
+		"cstrike/addons/amxmodx/logs/RV%04d%02d%02d.log",
 		tmv->tm_year + 1900, tmv->tm_mon + 1, tmv->tm_mday);
 	if (pathLen < 0 || pathLen >= (int)sizeof(path)) return;
 
