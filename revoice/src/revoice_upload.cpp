@@ -470,18 +470,43 @@ static void *UploadThreadFunc(void *arg)
 	}
 
 	// Phase 3: delete confirmed files locally.
-	// IMPORTANT: deletion is currently disabled for testing. Once the verify
-	// path has been validated end-to-end, uncomment the unlink() below.
+	//
+	// SAFETY — every fullPath reaching unlink() satisfies all four:
+	//   (1) S_ISREG(st.st_mode) — regular file, not a directory, not a
+	//       directory through a symlink (stat would resolve the symlink
+	//       and the if-branch above this code calls ScanWavFiles
+	//       recursively only on S_ISDIR; a symlink-to-dir would land
+	//       in S_ISDIR and recurse, not in S_ISREG).
+	//   (2) filename ends in ".wav" (case-insensitive, via strcasecmp).
+	//   (3) path is rooted at "cstrike/data/" (the initial dir argument
+	//       to ScanWavFiles; recursion only descends into subdirs of it).
+	//   (4) confirmed[i] is true ONLY when the Python /verify response
+	//       contained literally "OK <relpath>" for this exact relpath.
+	//
+	// Therefore unlink() can NEVER reach cstrike/, the engine binary, a
+	// configuration file, or any non-.wav. The worst case it can do is
+	// erase a .wav that was placed in cstrike/data/ by someone other than
+	// the recorder — but the upload+verify chain already proved that copy
+	// exists on the receiver, so that's the intended behaviour.
+	int deletedCount = 0;
+	int unlinkErrors = 0;
 	for (int i = 0; i < total; i++) {
 		if (!confirmed[i]) continue;
 		const std::string &fullPath = job->files[i].first;
-		// unlink(fullPath.c_str());
-		(void)fullPath;
+		if (unlink(fullPath.c_str()) == 0) {
+			deletedCount++;
+			RvLogUpload("[upload] [%d/%d] deleted: %s",
+				deletedCount, confirmedCount, fullPath.c_str());
+		} else {
+			unlinkErrors++;
+			RvLogUpload("[upload] WARN unlink failed: %s (errno=%d)",
+				fullPath.c_str(), errno);
+		}
 	}
 
 	double percent = total > 0 ? (100.0 * confirmedCount / total) : 0.0;
-	RvLogUpload("[upload] done: uploaded=%d/%d, confirmed=%d/%d (%.1f%%)",
-		uploadedCount, total, confirmedCount, total, percent);
+	RvLogUpload("[upload] done: uploaded=%d/%d, confirmed=%d/%d (%.1f%%), deleted=%d, unlink_errors=%d",
+		uploadedCount, total, confirmedCount, total, percent, deletedCount, unlinkErrors);
 
 	delete job;
 	g_uploadInProgress = false;
