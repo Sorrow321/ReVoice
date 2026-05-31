@@ -40,6 +40,10 @@ static inline void REV_PlaybackDebugPrintf(const char* fmt, ...)
 static const int REV_VOICE_QUEUE_MAX_PAYLOAD = 4096;
 static const int REV_VOICE_QUEUE_CAP_FRAMES = 64; // ~1.28s at 20ms frames
 
+// Largest frame we ever emit: 100 ms at 8 kHz. frame_ms is clamped to <=100 in Update(),
+// so FRAME_SAMPLES_8K can never exceed this. Used to size the silence scratch buffers.
+static const int REV_MAX_FRAME_SAMPLES_8K = 800;
+
 struct REV_QueuedVoiceFrame {
 	int player0; // 0-based source player id written into svc_voicedata
 	int len;
@@ -362,6 +366,7 @@ CVoicePlayback::CVoicePlayback()
 CVoicePlayback::~CVoicePlayback()
 {
 	StopPlayback();
+	DeInitCodecs();
 }
 
 void CVoicePlayback::InitCodecs()
@@ -369,15 +374,42 @@ void CVoicePlayback::InitCodecs()
 	if (m_CodecsReady)
 		return;
 
+	// Build each codec independently and verify it initialized. A codec whose Init()
+	// fails (or that fails to allocate) is released and left null. BroadcastVoiceData
+	// only touches non-null codecs, so a partial failure degrades that one codec
+	// gracefully instead of crashing later in Compress — the Opus/Silk backends do
+	// NOT null-check their encoder handle, so a half-initialized codec would segfault.
 	m_SpeexCodec = new VoiceCodec_Frame(new VoiceEncoder_Speex());
-	m_SilkCodec  = new CSteamP2PCodec(new VoiceEncoder_Silk());
-	m_OpusCodec  = new CSteamP2PCodec(new VoiceEncoder_Opus());
+	if (m_SpeexCodec && !m_SpeexCodec->Init(SPEEX_VOICE_QUALITY)) {
+		m_SpeexCodec->Release();
+		m_SpeexCodec = nullptr;
+	}
 
-	m_SpeexCodec->Init(SPEEX_VOICE_QUALITY);
-	m_SilkCodec ->Init(SILK_VOICE_QUALITY);
-	m_OpusCodec ->Init(OPUS_VOICE_QUALITY);
+	m_SilkCodec = new CSteamP2PCodec(new VoiceEncoder_Silk());
+	if (m_SilkCodec && !m_SilkCodec->Init(SILK_VOICE_QUALITY)) {
+		m_SilkCodec->Release();
+		m_SilkCodec = nullptr;
+	}
 
+	m_OpusCodec = new CSteamP2PCodec(new VoiceEncoder_Opus());
+	if (m_OpusCodec && !m_OpusCodec->Init(OPUS_VOICE_QUALITY)) {
+		m_OpusCodec->Release();
+		m_OpusCodec = nullptr;
+	}
+
+	// Mark ready even on partial failure so we don't re-attempt (and re-allocate)
+	// every frame; the per-codec null checks handle any missing codec.
 	m_CodecsReady = true;
+}
+
+// Release the playback-owned codecs. Release() frees the backend encoder and then
+// the wrapper itself, so it must not be paired with an extra delete.
+void CVoicePlayback::DeInitCodecs()
+{
+	if (m_OpusCodec)  { m_OpusCodec->Release();  m_OpusCodec  = nullptr; }
+	if (m_SilkCodec)  { m_SilkCodec->Release();  m_SilkCodec  = nullptr; }
+	if (m_SpeexCodec) { m_SpeexCodec->Release(); m_SpeexCodec = nullptr; }
+	m_CodecsReady = false;
 }
 
 bool CVoicePlayback::ReadWavHeader(FILE* file, int& sampleRate, int& channels, int& bitsPerSample, unsigned int& dataSize)
@@ -430,8 +462,10 @@ bool CVoicePlayback::ReadWavHeader(FILE* file, int& sampleRate, int& channels, i
 			bitsPerSample = bps;
 			fmtFound = true;
 			
-			// Skip rest of chunk
-			fseek(file, chunkSize - 16, SEEK_CUR);
+			// Skip rest of chunk. Guard against a malformed fmt chunk smaller than the
+			// 16 bytes we just consumed (chunkSize is unsigned: chunkSize-16 would underflow).
+			if (chunkSize > 16)
+				fseek(file, chunkSize - 16, SEEK_CUR);
 		}
 		else if (memcmp(chunk, "data", 4) == 0) {
 			dataSize = chunkSize;
@@ -506,7 +540,50 @@ bool CVoicePlayback::StartPlayback(const char* filename, int playerIndex, float 
 		fclose(file);
 		return false;
 	}
-	
+
+	// Validate channel count and sample rate. These header fields are attacker-controlled
+	// for client-triggered playback; an out-of-range value would cause signed-overflow UB
+	// in the chunk-size math (Update) or a divide path that never produces audio.
+	if (channels < 1 || channels > 2) {
+		snprintf(msg, sizeof(msg), "[ReVoice Playback] ERROR: Unsupported channel count (%d): %s\n", channels, fullPath);
+		SERVER_PRINT(msg);
+		fclose(file);
+		return false;
+	}
+	if (sampleRate < 4000 || sampleRate > 48000) {
+		snprintf(msg, sizeof(msg), "[ReVoice Playback] ERROR: Unsupported sample rate (%d): %s\n", sampleRate, fullPath);
+		SERVER_PRINT(msg);
+		fclose(file);
+		return false;
+	}
+
+	// Clamp the header-declared data size to the bytes actually present in the file.
+	// A lying/oversized 'data' size would otherwise make the EOF test (dataPos >= dataSize)
+	// never trip, leaving the bot "mic" transmitting keepalive silence forever.
+	{
+		long dataStart = ftell(file);
+		if (dataStart >= 0 && fseek(file, 0, SEEK_END) == 0) {
+			long fileEnd = ftell(file);
+			if (fileEnd > dataStart) {
+				unsigned int avail = (unsigned int)(fileEnd - dataStart);
+				// Clamp an oversized/lying size, and treat a declared-0 size
+				// (some streamed WAVs) as "play to end of file".
+				if (dataSize == 0 || dataSize > avail)
+					dataSize = avail;
+			} else {
+				dataSize = 0;
+			}
+			fseek(file, dataStart, SEEK_SET); // restore to start of data
+		}
+	}
+
+	if (dataSize == 0) {
+		snprintf(msg, sizeof(msg), "[ReVoice Playback] ERROR: WAV has no audio data: %s\n", fullPath);
+		SERVER_PRINT(msg);
+		fclose(file);
+		return false;
+	}
+
 	// Setup playback state
 	m_State.file = file;
 	m_State.sampleRate = sampleRate;
@@ -558,9 +635,25 @@ void CVoicePlayback::Update()
 {
 	if (!m_State.active || !m_State.file)
 		return;
-	
+
+	// If the emitter slot is no longer an active client (e.g. the "bot" disconnected
+	// mid-song), stop instead of attributing voice to an empty or reused slot.
+	{
+		int emitter0 = m_State.targetPlayerIndex - 1;
+		if (emitter0 < 0 || emitter0 >= g_RehldsSvs->GetMaxClients()) {
+			StopPlayback();
+			return;
+		}
+		IGameClient* emitterClient = g_RehldsSvs->GetClient(emitter0);
+		if (!emitterClient || !emitterClient->IsActive()) {
+			StopPlayback();
+			SERVER_PRINT("[ReVoice Playback] Emitter no longer active; stopping playback\n");
+			return;
+		}
+	}
+
 	double currentTime = g_RehldsSv->GetTime();
-	
+
 	// Read audio from source WAV, resample to 8kHz mono, then feed encoders in *exact* frame sizes.
 	// IMPORTANT: We must avoid gaps in svc_voicedata; the client will fade out quickly when packets stop.
 	// So we maintain a small 8kHz PCM jitter buffer and schedule sends strictly using nextChunkTime.
@@ -575,7 +668,10 @@ void CVoicePlayback::Update()
 	chunkDurationMs = (chunkDurationMs / 20) * 20;
 	if (chunkDurationMs <= 0) chunkDurationMs = 40;
 
-	const int FRAME_SAMPLES_8K = (8000 * chunkDurationMs) / 1000;
+	int frameSamples8k = (8000 * chunkDurationMs) / 1000;
+	// Defensive: never exceed the silence-buffer capacity, even if the clamp above changes.
+	if (frameSamples8k > REV_MAX_FRAME_SAMPLES_8K) frameSamples8k = REV_MAX_FRAME_SAMPLES_8K;
+	const int FRAME_SAMPLES_8K = frameSamples8k;
 	const double frameSec = (chunkDurationMs / 1000.0);
 	const int carryCap = (int)(sizeof(m_State.pcm8kCarry) / sizeof(m_State.pcm8kCarry[0]));
 
@@ -612,14 +708,16 @@ void CVoicePlayback::Update()
 		if (chunkSize <= 0 || sourceSamples <= 0)
 			break;
 
-		char audioBuffer[16384];
+		// static: Update() runs once per server frame (single-threaded, non-reentrant),
+		// so keeping these large scratch buffers off the per-frame stack is safe.
+		static char audioBuffer[16384];
 		size_t bytesRead = fread(audioBuffer, 1, (size_t)chunkSize, m_State.file);
 		m_State.dataPos += (unsigned int)bytesRead;
 		if (bytesRead == 0)
 			break;
 
 		// Convert to 16-bit PCM if needed
-		short pcm16Buffer[16384];
+		static short pcm16Buffer[16384];
 		int numSourceSamples = 0;
 		if (m_State.bitsPerSample == 8) {
 			numSourceSamples = (int)bytesRead;
@@ -632,7 +730,7 @@ void CVoicePlayback::Update()
 			memcpy(pcm16Buffer, audioBuffer, bytesRead);
 		}
 
-		short pcm8k[2048];
+		static short pcm8k[2048];
 		int numSamples8k = ConvertToMonoResample(
 			pcm16Buffer, numSourceSamples, m_State.sampleRate, m_State.channels,
 			pcm8k, (int)(sizeof(pcm8k) / sizeof(pcm8k[0])), 8000
@@ -682,7 +780,7 @@ void CVoicePlayback::Update()
 			// voicedata entirely. The client fades out quickly when packets stop; sending silence frames
 			// (non-final) keeps the "mic" alive until we refill the PCM buffer.
 			if (m_State.dataPos < m_State.dataSize) {
-				short silence[800] = {0};
+				short silence[REV_MAX_FRAME_SAMPLES_8K] = {0};
 				BroadcastVoiceData(silence, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, false, m_State.targetMask);
 				s_dbgKeepaliveSent++;
 				s_dbgUnderflowTicks++;
@@ -720,7 +818,7 @@ void CVoicePlayback::Update()
 				if (gapFrames < 1) gapFrames = 1;
 			}
 
-			short silence[800] = {0}; // supports up to 100ms at 8kHz
+			short silence[REV_MAX_FRAME_SAMPLES_8K] = {0}; // supports up to 100ms at 8kHz
 			BroadcastVoiceData(silence, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, true, m_State.targetMask);
 			m_State.framesSinceReset = 0;
 			m_State.resetGapFramesRemaining = gapFrames;
@@ -752,7 +850,7 @@ void CVoicePlayback::Update()
 				m_State.pcm8kCarry[i] = 0;
 			BroadcastVoiceData(m_State.pcm8kCarry, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, true, m_State.targetMask);
 		} else {
-			short silence[800] = {0};
+			short silence[REV_MAX_FRAME_SAMPLES_8K] = {0};
 			BroadcastVoiceData(silence, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, true, m_State.targetMask);
 		}
 		StopPlayback();
@@ -790,71 +888,51 @@ void CVoicePlayback::Update()
 	}
 }
 
-// Helper function to find the best player index for voice emission
+// Find the emitter bot's player index (1-based) by name.
+// Hard requirements:
+//   - the client must be a server-side fake client (FL_FAKECLIENT); a real player
+//     can never be selected, even if they set their name to match the bot;
+//   - its name must contain the configured bot name.
+// If no matching bot exists we deliberately DO NOT fall back to a human player:
+// we log and return -1 so the caller aborts and nothing is emitted.
+// The per-slot enumeration prints are gated behind REV_PlaybackDebug to avoid log spam.
 static int FindVoiceEmitter()
 {
-	char msg[256];
-	int playerIndex = -1;
 	const char* botName = (g_pcv_rev_playback_bot_name && g_pcv_rev_playback_bot_name->string && g_pcv_rev_playback_bot_name->string[0])
 		? g_pcv_rev_playback_bot_name->string
 		: "vk.com/laguna_games";
 	int maxclients = g_RehldsSvs->GetMaxClients();
-	
-	SERVER_PRINT("[ReVoice] === Searching for voice emitter (using Rehlds API) ===\n");
-	
-	// Use Rehlds API to get all clients (including bots)
+
+	REV_PlaybackDebugPrint("[ReVoice] === Searching for emitter bot (using Rehlds API) ===\n");
+
 	for (int i = 0; i < maxclients; i++) {
 		IGameClient* client = g_RehldsSvs->GetClient(i);
-		if (client && client->IsActive()) {
-			const char* playerName = client->GetName();
-			if (playerName && playerName[0] != '\0') {
-				snprintf(msg, sizeof(msg), "[ReVoice] Slot %d: '%s' (active=%d, spawned=%d)\n", 
-					i + 1, playerName, client->IsActive() ? 1 : 0, client->IsSpawned() ? 1 : 0);
-				SERVER_PRINT(msg);
-				
-				if (strstr(playerName, botName) != nullptr) {
-					playerIndex = i + 1;
-					snprintf(msg, sizeof(msg), "[ReVoice] MATCH! Found bot '%s' at slot %d\n", playerName, playerIndex);
-					SERVER_PRINT(msg);
-					return playerIndex;
-				}
-			}
+		if (!client || !client->IsActive())
+			continue;
+
+		// Must be a bot (fake client). This is the authoritative check — names are spoofable.
+		edict_t* ed = client->GetEdict();
+		if (!ed || !(ed->v.flags & FL_FAKECLIENT))
+			continue;
+
+		const char* playerName = client->GetName();
+		if (!playerName || playerName[0] == '\0')
+			continue;
+
+		REV_PlaybackDebugPrintf("[ReVoice] Bot candidate slot %d: '%s'\n", i + 1, playerName);
+
+		if (strstr(playerName, botName) != nullptr) {
+			int playerIndex = i + 1;
+			REV_PlaybackDebugPrintf("[ReVoice] MATCH! Found bot '%s' at slot %d\n", playerName, playerIndex);
+			return playerIndex;
 		}
 	}
-	
-	SERVER_PRINT("[ReVoice] === End of client list ===\n");
-	
-	// If bot not found, find any player that's not slot 1
-	SERVER_PRINT("[ReVoice] Bot not found, searching for alternative player...\n");
-	int firstPlayer = -1;
-	
-	for (int i = 0; i < maxclients; i++) {
-		IGameClient* client = g_RehldsSvs->GetClient(i);
-		if (client && client->IsActive()) {
-			const char* playerName = client->GetName();
-			if (!playerName || playerName[0] == '\0')
-				playerName = "Unknown";
-			
-			if (firstPlayer == -1) {
-				firstPlayer = i + 1;
-				snprintf(msg, sizeof(msg), "[ReVoice] Found player '%s' at slot %d\n", playerName, i + 1);
-				SERVER_PRINT(msg);
-			}
-			
-			if (i != 0) { // Prefer not using slot 1
-				playerIndex = i + 1;
-				snprintf(msg, sizeof(msg), "[ReVoice] Using player '%s' at slot %d\n", playerName, playerIndex);
-				SERVER_PRINT(msg);
-				return playerIndex;
-			}
-		}
-	}
-	
-	if (playerIndex == -1) {
-		playerIndex = firstPlayer;
-	}
-	
-	return playerIndex;
+
+	// No matching bot — do not borrow a real player; report and abort.
+	char msg[256];
+	snprintf(msg, sizeof(msg), "[ReVoice] No emitter bot matching name '%s' is connected; playback aborted\n", botName);
+	SERVER_PRINT(msg);
+	return -1;
 }
 
 void Revoice_VoicePlayback_Init()
@@ -903,6 +981,24 @@ void Cmd_PlayVoice()
 	}
 }
 
+// Reject anything that could escape cstrike/: absolute paths, drive letters, UNC,
+// and parent-directory traversal. Used only for the untrusted client-triggered path
+// (the rcon/console sv_playvoice* commands are trusted and may use absolute paths).
+static bool REV_IsSafeRelativePath(const char* path)
+{
+	if (!path || !path[0])
+		return false;
+	if (path[0] == '/' || path[0] == '\\') // unix/UNC absolute
+		return false;
+	if (path[1] == ':') // windows drive letter (e.g. C:\)
+		return false;
+	for (const char* p = path; *p; p++) {
+		if (p[0] == '.' && p[1] == '.') // parent-dir traversal anywhere
+			return false;
+	}
+	return true;
+}
+
 void Cmd_PlayVoice_Client(edict_t* pEntity)
 {
 	if (!pEntity)
@@ -913,17 +1009,36 @@ void Cmd_PlayVoice_Client(edict_t* pEntity)
 		return;
 	}
 
+	// Rate-limit client-triggered playback. Without this a client can spam the command
+	// to churn fopen/fclose, restart playback, and flood the server console/log.
+	// Store the last trigger time (not a deadline) so a sv.time reset at the map
+	// boundary — which makes 'now' jump backwards — is treated as "cooldown expired"
+	// instead of locking the command out for the length of the previous map.
+	const double kClientPlayCooldownSec = 5.0;
+	static double s_lastClientPlayTime = -1000.0;
+	double now = g_RehldsSv->GetTime();
+	if (now >= s_lastClientPlayTime && now < s_lastClientPlayTime + kClientPlayCooldownSec) {
+		g_engfuncs.pfnClientPrintf(pEntity, print_console, "[ReVoice] Please wait before requesting playback again\n");
+		return;
+	}
+	s_lastClientPlayTime = now; // 5s cooldown across all clients
+
 	SERVER_PRINT("[ReVoice] playvoice command received from client\n");
-	
+
 	const char* filename = CMD_ARGV(1);
-	
+
 	if (!filename || !filename[0]) {
 		g_engfuncs.pfnClientPrintf(pEntity, print_console, "Usage: playvoice <filename>\n");
 		g_engfuncs.pfnClientPrintf(pEntity, print_console, "Example: playvoice sound/custom/music1.wav\n");
-		g_engfuncs.pfnClientPrintf(pEntity, print_console, "Path is relative to cstrike/ (absolute paths allowed)\n");
+		g_engfuncs.pfnClientPrintf(pEntity, print_console, "Path is relative to cstrike/\n");
 		return;
 	}
-	
+
+	if (!REV_IsSafeRelativePath(filename)) {
+		g_engfuncs.pfnClientPrintf(pEntity, print_console, "[ReVoice] Invalid path (must be relative, no '..')\n");
+		return;
+	}
+
 	char msg[256];
 	snprintf(msg, sizeof(msg), "[ReVoice] Client playback request: %s\n", filename);
 	SERVER_PRINT(msg);

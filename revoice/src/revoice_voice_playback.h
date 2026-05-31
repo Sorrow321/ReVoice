@@ -45,6 +45,7 @@ public:
 	~CVoicePlayback();
 
 	void InitCodecs();
+	void DeInitCodecs();
 
 	CSteamP2PCodec* GetOpusCodec()    const { return m_OpusCodec; }
 	CSteamP2PCodec* GetSilkCodec()    const { return m_SilkCodec; }

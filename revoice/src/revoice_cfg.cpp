@@ -111,9 +111,8 @@ void Revoice_Init_Cvars()
 	g_RehldsFuncs->AddCvarListener(g_cv_rev_hltv_codec.name, Revoice_Update_Hltv);
 	g_RehldsFuncs->AddCvarListener(g_cv_rev_default_codec.name, Revoice_Update_Players);
 
-	// Voice playback subsystem (sv_playvoice / sv_playvoice_ex) — disabled
-	// while we isolate the wav-save + ASR path. Re-enable by uncommenting.
-	// Revoice_VoicePlayback_Init();
+	// Voice playback subsystem (sv_playvoice / sv_playvoice_ex).
+	Revoice_VoicePlayback_Init();
 }
 
 void Revoice_DeInit_Cvars()

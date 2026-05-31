@@ -314,13 +314,12 @@ qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char
 
 void ClientCommand_PreHook(edict_t *pEntity)
 {
-	// Client-driven "playvoice" is part of the disabled playback subsystem;
-	// fall through to the game DLL untouched.
-	// const char* cmd = CMD_ARGV(0);
-	// if (cmd && _stricmp(cmd, "playvoice") == 0) {
-	//     Cmd_PlayVoice_Client(pEntity);
-	//     RETURN_META(MRES_SUPERCEDE);
-	// }
+	// Client-driven "playvoice" command (gated server-side by REV_PlayVoiceClient).
+	const char* cmd = CMD_ARGV(0);
+	if (cmd && _stricmp(cmd, "playvoice") == 0) {
+		Cmd_PlayVoice_Client(pEntity);
+		RETURN_META(MRES_SUPERCEDE);
+	}
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -348,13 +347,17 @@ void ServerDeactivate_PreHook()
 {
 	RvLog("[HOOK] ServerDeactivate");
 	Revoice_FlushAll_Players();
+	// Stop any in-progress music playback cleanly at the map boundary: closes the WAV
+	// file and resets timing. Otherwise the file stays open and nextChunkTime (tied to
+	// the old sv.time) never catches up after sv.time resets on the next map.
+	g_VoicePlayback.StopPlayback();
 	SET_META_RESULT(MRES_IGNORED);
 }
 
 void StartFrame_PreHook()
 {
-	// Voice playback (bot-emitted music) — disabled while we isolate.
-	// g_VoicePlayback.Update();
+	// Voice playback (bot-emitted music).
+	g_VoicePlayback.Update();
 
 	double now = g_RehldsSv->GetTime();
 	int maxclients = g_RehldsSvs->GetMaxClients();
