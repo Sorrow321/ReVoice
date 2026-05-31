@@ -98,3 +98,14 @@ void RvLogUpload(const char *fmt, ...)
 	WriteLogLine("RV_upload_", false, fmt, ap);
 	va_end(ap);
 }
+
+void RvLogAction(const char *fmt, ...)
+{
+	// Intentionally NOT gated by REV_DebugLog: this is the player-action audit
+	// trail (who started/stopped/seeked music, and any failures), which should
+	// always be retained regardless of the debug-log kill switch.
+	va_list ap;
+	va_start(ap, fmt);
+	WriteLogLine("RV_actions_", false, fmt, ap);
+	va_end(ap);
+}

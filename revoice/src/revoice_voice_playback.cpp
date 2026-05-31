@@ -345,10 +345,19 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 		REV_PlaybackDebugPrintf("[ReVoice Playback] Sent to %d clients\n", sentCount);
 }
 
+// Publish tri-state playback status for external tools (AMXX menu reads this cvar):
+//   0 = stopped, 1 = playing, 2 = paused.
+static void REV_SetPlaybackStatusCvar(float v)
+{
+	if (g_pcv_rev_playback_active)
+		g_engfuncs.pfnCVarSetFloat(g_pcv_rev_playback_active->name, v);
+}
+
 CVoicePlayback::CVoicePlayback()
 {
 	m_State.file = nullptr;
 	m_State.active = false;
+	m_State.paused = false;
 	m_State.dataPos = 0;
 	m_State.pcm8kCarrySamples = 0;
 	m_State.framesSinceReset = 0;
@@ -609,9 +618,8 @@ bool CVoicePlayback::StartPlayback(const char* filename, int playerIndex, float 
 	m_State.lowpassState = 0.0f;
 	REV_ResetPlaybackVoiceQueues();
 	
-	// Publish "playing" status for external tools (AMXX menu reads this cvar).
-	if (g_pcv_rev_playback_active)
-		g_engfuncs.pfnCVarSetFloat(g_pcv_rev_playback_active->name, 1.0f);
+	m_State.paused = false;
+	REV_SetPlaybackStatusCvar(1.0f); // playing
 
 	snprintf(msg, sizeof(msg), "[ReVoice Playback] SUCCESS: Playback started for %s\n", filename);
 	SERVER_PRINT(msg);
@@ -626,11 +634,10 @@ void CVoicePlayback::StopPlayback()
 		m_State.file = nullptr;
 	}
 	m_State.active = false;
+	m_State.paused = false;
 	m_State.dataPos = 0;
 	m_State.dataStart = 0;
-	// Clear "playing" status for external tools (AMXX menu reads this cvar).
-	if (g_pcv_rev_playback_active)
-		g_engfuncs.pfnCVarSetFloat(g_pcv_rev_playback_active->name, 0.0f);
+	REV_SetPlaybackStatusCvar(0.0f); // stopped
 	m_State.pcm8kCarrySamples = 0;
 	m_State.framesSinceReset = 0;
 	m_State.resetGapFramesRemaining = 0;
@@ -682,6 +689,34 @@ bool CVoicePlayback::SeekRelative(double seconds)
 	REV_ResetPlaybackVoiceQueues();
 	// Resync the send schedule to "now" so we don't burst catch-up frames after the jump.
 	m_State.nextChunkTime = g_RehldsSv->GetTime();
+	return true;
+}
+
+bool CVoicePlayback::Pause()
+{
+	// Only a live, non-paused playback can be paused.
+	if (!m_State.active || !m_State.file || m_State.paused)
+		return false;
+
+	// Stop emitting but keep EVERYTHING (open file, dataPos, carry buffer, lowpass
+	// state) so Resume() continues seamlessly. Update() early-returns while !active.
+	m_State.active = false;
+	m_State.paused = true;
+	REV_SetPlaybackStatusCvar(2.0f); // paused
+	return true;
+}
+
+bool CVoicePlayback::Resume()
+{
+	if (!m_State.paused || !m_State.file)
+		return false;
+
+	m_State.active = true;
+	m_State.paused = false;
+	// Wall-clock advanced while paused; resync so the catch-up loop doesn't flush a
+	// burst of frames trying to "make up" the paused interval.
+	m_State.nextChunkTime = g_RehldsSv->GetTime();
+	REV_SetPlaybackStatusCvar(1.0f); // playing
 	return true;
 }
 
@@ -995,31 +1030,47 @@ void Revoice_VoicePlayback_Init()
 	g_engfuncs.pfnAddServerCommand("sv_playvoice_ex", Cmd_PlayVoice_Ex);
 	g_engfuncs.pfnAddServerCommand("sv_stopvoice", Cmd_StopVoice);
 	g_engfuncs.pfnAddServerCommand("sv_voiceseek", Cmd_VoiceSeek);
+	g_engfuncs.pfnAddServerCommand("sv_pausevoice", Cmd_PauseVoice);
+	g_engfuncs.pfnAddServerCommand("sv_resumevoice", Cmd_ResumeVoice);
 	g_VoicePlayback.InitCodecs();
-	SERVER_PRINT("[ReVoice] Voice playback commands registered: sv_playvoice, sv_playvoice_ex, sv_stopvoice, sv_voiceseek\n");
+	SERVER_PRINT("[ReVoice] Voice playback commands registered: sv_playvoice, sv_playvoice_ex, sv_stopvoice, sv_voiceseek, sv_pausevoice, sv_resumevoice\n");
 }
 
-// Stop current playback. No-op (with a note) if nothing is playing.
+// Actor descriptor for the action log. The AMXX menu passes a quoted token
+// "<steamid> (<ip>) <name>" as the trailing command argument; for rcon/console
+// use (no such argument) we record "console".
+static const char* REV_ActorArg(int idx)
+{
+	const char* a = CMD_ARGV(idx);
+	return (a && a[0]) ? a : "console";
+}
+
+// Stop current playback. No-op (with a note) if nothing is playing/paused.
 void Cmd_StopVoice()
 {
-	if (!g_VoicePlayback.IsPlaying()) {
+	const char* actor = REV_ActorArg(1);
+
+	if (!g_VoicePlayback.IsPlaying() && !g_VoicePlayback.IsPaused()) {
 		SERVER_PRINT("[ReVoice] sv_stopvoice: nothing is playing\n");
 		return;
 	}
 	g_VoicePlayback.StopPlayback();
 	SERVER_PRINT("[ReVoice] sv_stopvoice: playback stopped\n");
+	RvLogAction("Player %s stopped music", actor);
 }
 
-// Seek relative: sv_voiceseek <seconds> (e.g. 10 forward, -10 backward).
+// Seek relative: sv_voiceseek <seconds> [actor] (e.g. 10 forward, -10 backward).
 // Guarded: does nothing if not currently playing; clamps to [start, end].
 void Cmd_VoiceSeek()
 {
+	const char* arg = CMD_ARGV(1);
+	const char* actor = REV_ActorArg(2);
+
 	if (!g_VoicePlayback.IsPlaying()) {
 		SERVER_PRINT("[ReVoice] sv_voiceseek: nothing is playing\n");
 		return;
 	}
 
-	const char* arg = CMD_ARGV(1);
 	if (!arg || !arg[0]) {
 		SERVER_PRINT("Usage: sv_voiceseek <seconds>   (e.g. 10 or -10)\n");
 		return;
@@ -1027,38 +1078,70 @@ void Cmd_VoiceSeek()
 
 	double seconds = atof(arg);
 	char msg[128];
-	if (g_VoicePlayback.SeekRelative(seconds))
+	if (g_VoicePlayback.SeekRelative(seconds)) {
 		snprintf(msg, sizeof(msg), "[ReVoice] sv_voiceseek: seeked %.1fs\n", seconds);
-	else
+		RvLogAction("Player %s seeked music %.1fs", actor, seconds);
+	} else {
 		snprintf(msg, sizeof(msg), "[ReVoice] sv_voiceseek: failed\n");
+		RvLogAction("Player %s FAILED to seek music %.1fs", actor, seconds);
+	}
 	SERVER_PRINT(msg);
 }
 
+// Pause current playback (keeps position for sv_resumevoice).
+void Cmd_PauseVoice()
+{
+	const char* actor = REV_ActorArg(1);
+
+	if (g_VoicePlayback.Pause()) {
+		SERVER_PRINT("[ReVoice] sv_pausevoice: paused\n");
+		RvLogAction("Player %s paused music", actor);
+	} else {
+		SERVER_PRINT("[ReVoice] sv_pausevoice: nothing to pause\n");
+	}
+}
+
+// Resume a paused playback from where it left off.
+void Cmd_ResumeVoice()
+{
+	const char* actor = REV_ActorArg(1);
+
+	if (g_VoicePlayback.Resume()) {
+		SERVER_PRINT("[ReVoice] sv_resumevoice: resumed\n");
+		RvLogAction("Player %s resumed music", actor);
+	} else {
+		SERVER_PRINT("[ReVoice] sv_resumevoice: nothing to resume\n");
+	}
+}
+
+// sv_playvoice <filename> [actor]
 void Cmd_PlayVoice()
 {
 	SERVER_PRINT("[ReVoice] sv_playvoice command received\n");
-	
+
 	const char* filename = CMD_ARGV(1);
-	
+	const char* actor = REV_ActorArg(2);
+
 	if (!filename || !filename[0]) {
 		SERVER_PRINT("Usage: sv_playvoice <filename>\n");
 		SERVER_PRINT("Example: sv_playvoice sound/custom/music1.wav\n");
 		SERVER_PRINT("Path is relative to cstrike/ (absolute paths also allowed)\n");
 		return;
 	}
-	
+
 	char msg[256];
 	snprintf(msg, sizeof(msg), "[ReVoice] Attempting to play: %s\n", filename);
 	SERVER_PRINT(msg);
-	
+
 	// Find the best player to emit from (preferably the bot)
 	int playerIndex = FindVoiceEmitter();
-	
+
 	if (playerIndex == -1) {
 		SERVER_PRINT("[ReVoice] ERROR: No connected players to emit voice from\n");
+		RvLogAction("Player %s FAILED to start music (no emitter bot): %s", actor, filename);
 		return;
 	}
-	
+
 	// Get and print the final player name
 	if (playerIndex >= 1 && playerIndex <= gpGlobals->maxClients) {
 		IGameClient* client = g_Players[playerIndex - 1].GetClient();
@@ -1066,9 +1149,12 @@ void Cmd_PlayVoice()
 		snprintf(msg, sizeof(msg), "[ReVoice] FINAL: Emitting voice from player '%s' (index %d)\n", finalName, playerIndex);
 		SERVER_PRINT(msg);
 	}
-	
+
 	if (!g_VoicePlayback.StartPlayback(filename, playerIndex, 1.0f, nullptr)) {
 		SERVER_PRINT("[ReVoice] Failed to start playback\n");
+		RvLogAction("Player %s FAILED to start music: %s", actor, filename);
+	} else {
+		RvLogAction("Player %s started music: %s", actor, filename);
 	}
 }
 

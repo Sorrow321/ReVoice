@@ -19,6 +19,7 @@ private:
 		int targetPlayerIndex;
 		double nextChunkTime;
 		bool active;
+		bool paused;   // true: playback suspended, file/position kept for Resume()
 		float volume;
 		bool targetMask[MAX_PLAYERS];
 		// Carry buffer at 8kHz mono PCM16 to feed encoders exact frame sizes (Opus/Silk/Speex stability)
@@ -62,12 +63,19 @@ public:
 	// seeking before the start snaps to the beginning; seeking past the end ends playback
 	// cleanly. No-op (returns false) if nothing is currently playing.
 	bool SeekRelative(double seconds);
+
+	// Pause: suspend emitting but keep the file open and the position/buffer intact.
+	// Resume: continue from exactly where Pause() left off. Both are no-ops (return
+	// false) if there is nothing to pause / nothing paused.
+	bool Pause();
+	bool Resume();
 	
 	// Called each frame to process playback
 	void Update();
 	
-	// Check if currently playing
+	// Check current state
 	bool IsPlaying() const { return m_State.active; }
+	bool IsPaused()  const { return m_State.paused; }
 };
 
 extern CVoicePlayback g_VoicePlayback;
@@ -80,5 +88,7 @@ void Cmd_PlayVoice();
 void Cmd_PlayVoice_Ex();
 void Cmd_StopVoice();
 void Cmd_VoiceSeek();
+void Cmd_PauseVoice();
+void Cmd_ResumeVoice();
 void Cmd_PlayVoice_Client(edict_t* pEntity);
 

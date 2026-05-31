@@ -24,10 +24,16 @@
 // correlation with frame-time events; the worker has nothing to
 // correlate it against.
 
+//   RvLogAction  →  RV_actions_YYYYMMDD.log (player-facing playback actions and
+//                    their outcomes/issues; main game thread; not gated by
+//                    REV_DebugLog so the audit trail is always kept).
+
 #if defined(__GNUC__) || defined(__clang__)
 void RvLog(const char *fmt, ...)       __attribute__((format(printf, 1, 2)));
 void RvLogUpload(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void RvLogAction(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #else
 void RvLog(const char *fmt, ...);
 void RvLogUpload(const char *fmt, ...);
+void RvLogAction(const char *fmt, ...);
 #endif
