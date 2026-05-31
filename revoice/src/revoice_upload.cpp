@@ -5,59 +5,32 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/select.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <time.h>
 #include <vector>
 #include <string>
 #include <utility>
 #include <set>
-#include <deque>
 
+// Hard total time budget for a single HTTP round-trip (connect + send + recv).
+// Wall-clock seconds, enforced via a deadline + select() so that a slow or
+// half-dead network cannot pin the worker thread for longer than this.
+// Atomicity is preserved either way: a timeout means HttpPost returns -1,
+// the file is not marked uploaded, no local copy is deleted, and the next
+// rv_upload_dump retries.
+static const int HTTP_TIMEOUT_SEC = 30;
+
+// Single guard: at most one upload worker may run at a time. Set true in
+// Cmd_UploadDump (main thread) before pthread_create; cleared by the worker
+// on exit. volatile is sufficient here — single writer + single reader,
+// no cross-thread ordering requirement beyond "worker eventually observes
+// the true value, main eventually observes the false value." Both happen
+// across pthread_create / pthread_exit synchronization points.
 static volatile bool g_uploadInProgress = false;
-static pthread_mutex_t g_uploadLogMutex = PTHREAD_MUTEX_INITIALIZER;
-static std::deque<std::string> g_uploadLogQueue;
-
-// Thread-safe logger for the upload worker. UTIL_LogPrintf cannot be called
-// from the worker thread (it has a static char[1024] buffer and ALERT(at_logged)
-// touches engine state without locking — at best you get garbled lines, at worst
-// a crash). So we enqueue formatted messages here under a mutex; the main thread
-// drains the queue every server frame via Revoice_Upload_DrainLog() and calls
-// UTIL_LogPrintf safely from there. A 10000-message cap prevents unbounded
-// memory growth if the main thread is wedged for any reason.
-static void UploadLog(const char *fmt, ...)
-{
-	char buf[512];
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-
-	pthread_mutex_lock(&g_uploadLogMutex);
-	g_uploadLogQueue.emplace_back(buf);
-	if (g_uploadLogQueue.size() > 10000)
-		g_uploadLogQueue.pop_front();
-	pthread_mutex_unlock(&g_uploadLogMutex);
-}
-
-// Called from the main thread (StartFrame_PreHook). Pulls all queued messages
-// from the worker and writes them to the server console via SERVER_PRINT.
-// (UTIL_LogPrintf -> ALERT(at_logged) does not visibly echo on this build.)
-void Revoice_Upload_DrainLog()
-{
-	for (;;) {
-		std::string msg;
-		pthread_mutex_lock(&g_uploadLogMutex);
-		if (g_uploadLogQueue.empty()) {
-			pthread_mutex_unlock(&g_uploadLogMutex);
-			return;
-		}
-		msg.swap(g_uploadLogQueue.front());
-		g_uploadLogQueue.pop_front();
-		pthread_mutex_unlock(&g_uploadLogMutex);
-
-		SERVER_PRINT(msg.c_str());
-	}
-}
 
 struct ParsedUrl {
 	char host[256];
@@ -102,13 +75,79 @@ static bool ParseHttpUrl(const char *url, ParsedUrl &out)
 	return true;
 }
 
-static bool SendAll(int fd, const char *data, size_t len)
+// Percent-encode a path for use in single-line HTTP fields (the X-Filepath
+// header and the verify-body lines). Preserves ASCII unreserved characters
+// (RFC 3986: A-Z a-z 0-9 - _ . ~) plus '/' so path separators stay readable.
+// Everything else — including every byte of a UTF-8 multibyte sequence such
+// as the Cyrillic in "ушастик" — becomes %XX. This keeps the wire bytes pure
+// ASCII, which round-trips cleanly through Python's http.server header parser
+// (which decodes headers as Latin-1) — the receiver calls
+// urllib.parse.unquote() to restore the original UTF-8.
+static void PercentEncode(const char *src, std::string &out)
+{
+	out.clear();
+	if (!src) return;
+	static const char hex[] = "0123456789ABCDEF";
+	for (; *src; ++src) {
+		unsigned char c = (unsigned char)*src;
+		if ((c >= 'A' && c <= 'Z') ||
+		    (c >= 'a' && c <= 'z') ||
+		    (c >= '0' && c <= '9') ||
+		     c == '-' || c == '_' || c == '.' || c == '~' || c == '/')
+		{
+			out.push_back((char)c);
+		} else {
+			out.push_back('%');
+			out.push_back(hex[c >> 4]);
+			out.push_back(hex[c & 0xF]);
+		}
+	}
+}
+
+// Block until `fd` is ready for read or write, or `deadline` (a wall-clock
+// time_t) elapses. Returns 0 if ready, -1 on timeout / error / EOF.
+// Retries on EINTR so a stray signal doesn't abort an otherwise-healthy op.
+static int WaitForSocket(int fd, bool forRead, time_t deadline)
+{
+	for (;;) {
+		time_t now = time(nullptr);
+		if (now >= deadline) return -1;
+
+		struct timeval tv;
+		tv.tv_sec  = deadline - now;
+		tv.tv_usec = 0;
+
+		fd_set fds;
+		FD_ZERO(&fds);
+		FD_SET(fd, &fds);
+
+		int rc = select(fd + 1,
+			forRead  ? &fds : nullptr,
+			forRead  ? nullptr : &fds,
+			nullptr, &tv);
+		if (rc > 0) return 0;        // ready
+		if (rc == 0) return -1;       // hit deadline
+		if (errno == EINTR) continue; // benign, retry remaining time
+		return -1;                    // other error
+	}
+}
+
+// Send all `len` bytes of `data` on a non-blocking socket, bounded by
+// `deadline`. Returns false on timeout, connection failure, or partial write
+// that can't complete in time. EAGAIN/EWOULDBLOCK from a non-blocking send
+// is treated as "kernel buffer full" — we wait for writability and retry.
+static bool SendAll(int fd, const char *data, size_t len, time_t deadline)
 {
 	size_t sent = 0;
 	while (sent < len) {
+		if (WaitForSocket(fd, false, deadline) < 0) return false;
 		ssize_t n = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
-		if (n <= 0) return false;
-		sent += n;
+		if (n < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+			return false;
+		}
+		if (n == 0) return false;  // unexpected
+		sent += (size_t)n;
 	}
 	return true;
 }
@@ -126,6 +165,13 @@ static bool SendAll(int fd, const char *data, size_t len)
 static int HttpPost(const ParsedUrl &url, const char *path, const char *xFilepath,
 	const char *contentType, const char *body, long bodyLen, std::string *respBody)
 {
+	// One wall-clock deadline shared by connect + send + recv. If the
+	// network is slow at any phase, the unused budget from earlier phases
+	// flows into later ones; if any single phase exceeds the budget, we
+	// bail and the caller (UploadOneFile / UploadThreadFunc) treats the
+	// file as failed.
+	const time_t deadline = time(nullptr) + HTTP_TIMEOUT_SEC;
+
 	struct addrinfo hints = {}, *res = nullptr;
 	hints.ai_family = AF_INET;
 	hints.ai_socktype = SOCK_STREAM;
@@ -136,17 +182,49 @@ static int HttpPost(const ParsedUrl &url, const char *path, const char *xFilepat
 	int sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	if (sockfd < 0) { freeaddrinfo(res); return -1; }
 
-	struct timeval tv;
-	tv.tv_sec = 300;
-	tv.tv_usec = 0;
-	setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-	setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-	if (connect(sockfd, res->ai_addr, res->ai_addrlen) < 0) {
+	// Non-blocking for the entire socket lifetime. SO_SNDTIMEO /
+	// SO_RCVTIMEO are NOT used — they don't affect connect() (which would
+	// otherwise spin for ~75 s on a firewalled peer via kernel default
+	// SYN-retry behaviour), and WaitForSocket() already enforces the
+	// per-call timeout off the shared deadline.
+	int oldFlags = fcntl(sockfd, F_GETFL, 0);
+	if (oldFlags == -1 ||
+	    fcntl(sockfd, F_SETFL, oldFlags | O_NONBLOCK) == -1)
+	{
 		freeaddrinfo(res);
 		close(sockfd);
 		return -1;
 	}
+
+	int rc = connect(sockfd, res->ai_addr, res->ai_addrlen);
+	if (rc < 0 && errno != EINPROGRESS) {
+		freeaddrinfo(res);
+		close(sockfd);
+		return -1;
+	}
+
+	if (rc < 0) {
+		// EINPROGRESS: connect handshake started, wait for completion.
+		if (WaitForSocket(sockfd, false, deadline) < 0) {
+			freeaddrinfo(res);
+			close(sockfd);
+			return -1;
+		}
+		// Socket is writable — could mean "connected" OR "connect failed
+		// with an asynchronous error". SO_ERROR distinguishes.
+		int sockerr = 0;
+		socklen_t errLen = sizeof(sockerr);
+		if (getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &sockerr, &errLen) < 0
+		    || sockerr != 0)
+		{
+			freeaddrinfo(res);
+			close(sockfd);
+			return -1;
+		}
+	}
+	// rc == 0 → connect completed synchronously (uncommon but legal,
+	// e.g. localhost). Either way, we're now connected.
+
 	freeaddrinfo(res);
 
 	char header[2048];
@@ -172,25 +250,34 @@ static int HttpPost(const ParsedUrl &url, const char *path, const char *xFilepat
 			path, url.host, url.port, contentType, bodyLen);
 	}
 
-	// snprintf returns the would-be length on truncation; sending hdrLen bytes from a
-	// truncated buffer would read past the end of `header` and leak adjacent stack memory
-	// onto the wire (and likely crash). Bail out instead.
+	// snprintf returns the would-be length on truncation; sending hdrLen bytes from
+	// a truncated buffer would read past the end of `header` and leak adjacent stack
+	// memory onto the wire (and likely crash). Bail out instead.
 	if (hdrLen < 0 || hdrLen >= (int)sizeof(header)) {
 		close(sockfd);
 		return -1;
 	}
 
-	if (!SendAll(sockfd, header, hdrLen) || (bodyLen > 0 && !SendAll(sockfd, body, bodyLen))) {
+	if (!SendAll(sockfd, header, hdrLen, deadline)
+	    || (bodyLen > 0 && !SendAll(sockfd, body, bodyLen, deadline)))
+	{
 		close(sockfd);
 		return -1;
 	}
 
 	// Read full response (server sends Connection: close, so EOF marks end).
+	// Each recv() is gated by WaitForSocket against the shared deadline, so
+	// a hung peer can't drag the recv past HTTP_TIMEOUT_SEC total.
 	std::string resp;
 	char chunk[4096];
-	while (resp.size() < 16 * 1024 * 1024) { // 16 MB cap as a safety net
+	while (resp.size() < 16 * 1024 * 1024) {  // 16 MB safety cap
+		if (WaitForSocket(sockfd, true, deadline) < 0) break;
 		ssize_t n = recv(sockfd, chunk, sizeof(chunk), 0);
-		if (n <= 0) break;
+		if (n < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) continue;
+			break;  // hard error
+		}
+		if (n == 0) break;  // peer FIN
 		resp.append(chunk, (size_t)n);
 	}
 	close(sockfd);
@@ -212,48 +299,6 @@ static int HttpPost(const ParsedUrl &url, const char *path, const char *xFilepat
 	return httpCode;
 }
 
-// Crash recovery: any "M_*.wav" left on disk from a previous server run is an
-// orphan — the writer was killed before CloseWavIfOpen could strip the prefix.
-// At plugin load there is no live writer yet, so it is safe to rename them all.
-// Without this, orphans would never be picked up by ScanWavFiles.
-static void RecoverOrphanedRecordings(const char *dir)
-{
-	DIR *d = opendir(dir);
-	if (!d) return;
-
-	struct dirent *ent;
-	while ((ent = readdir(d)) != nullptr) {
-		if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-			continue;
-
-		char fullPath[512];
-		snprintf(fullPath, sizeof(fullPath), "%s/%s", dir, ent->d_name);
-
-		struct stat st;
-		if (stat(fullPath, &st) != 0) continue;
-
-		if (S_ISDIR(st.st_mode)) {
-			RecoverOrphanedRecordings(fullPath);
-		} else if (S_ISREG(st.st_mode)
-			&& ent->d_name[0] == 'M' && ent->d_name[1] == '_')
-		{
-			char finalPath[512];
-			snprintf(finalPath, sizeof(finalPath), "%s/%s", dir, ent->d_name + 2);
-			if (rename(fullPath, finalPath) == 0) {
-				UploadLog("[ReVoice] Recovered orphan recording: %s\n", finalPath);
-			}
-		}
-	}
-	closedir(d);
-}
-
-bool Revoice_Upload_Init()
-{
-	SERVER_PRINT("[ReVoice] rv_upload_dump available (raw socket HTTP)\n");
-	RecoverOrphanedRecordings("cstrike/data");
-	return true;
-}
-
 static void ScanWavFiles(const char *dir, const char *baseDir, std::vector<std::pair<std::string, std::string>> &out)
 {
 	DIR *d = opendir(dir);
@@ -273,12 +318,6 @@ static void ScanWavFiles(const char *dir, const char *baseDir, std::vector<std::
 		if (S_ISDIR(st.st_mode)) {
 			ScanWavFiles(fullPath, baseDir, out);
 		} else if (S_ISREG(st.st_mode)) {
-			// Skip in-progress recordings: CRevoicePlayer::AppendWav opens new files
-			// with an "M_" prefix and CRevoicePlayer::CloseWavIfOpen renames it away
-			// once the WAV is finalized. Reading an M_-prefixed file would race with
-			// the writer (header rewrite + tail append).
-			if (ent->d_name[0] == 'M' && ent->d_name[1] == '_')
-				continue;
 			const char *ext = strrchr(ent->d_name, '.');
 			if (ext && strcasecmp(ext, ".wav") == 0) {
 				const char *rel = fullPath + baseDirLen;
@@ -313,14 +352,21 @@ static bool UploadOneFile(const ParsedUrl &url, const char *fullPath, const char
 	fclose(f);
 	if ((long)rd != fileSize) { free(buf); return false; }
 
-	int code = HttpPost(url, url.path, relPath, "application/octet-stream", buf, fileSize, nullptr);
+	// Percent-encode the relpath so non-ASCII filenames survive the
+	// Latin-1 header decode on the Python side. relPath itself is kept
+	// for logging.
+	std::string encodedRel;
+	PercentEncode(relPath, encodedRel);
+
+	int code = HttpPost(url, url.path, encodedRel.c_str(), "application/octet-stream", buf, fileSize, nullptr);
 	free(buf);
 
 	if (code != 200) {
 		if (code < 0)
-			UploadLog("[ReVoice Upload] Connection failed: %s\n", relPath);
+			RvLogUpload("[upload] connection/timeout (≤%ds) — skipping: %s",
+				HTTP_TIMEOUT_SEC, relPath);
 		else
-			UploadLog("[ReVoice Upload] HTTP %d: %s\n", code, relPath);
+			RvLogUpload("[upload] HTTP %d — skipping: %s", code, relPath);
 		return false;
 	}
 	return true;
@@ -332,36 +378,36 @@ static void *UploadThreadFunc(void *arg)
 	int total = (int)job->files.size();
 
 	// NOTE: this build runs with -fno-exceptions, so std::bad_alloc and friends
-	// would terminate the process rather than unwind the stack here. The cleanup
-	// at the bottom (delete job; g_uploadInProgress = false) therefore only needs
-	// to run on the normal-flow paths, and every early return below performs that
-	// cleanup explicitly.
+	// would terminate the process rather than unwind the stack here. Every
+	// early return below performs the cleanup (delete job; g_uploadInProgress=false)
+	// explicitly.
 
-	UploadLog("[ReVoice Upload] Starting dump of %d files to http://%s:%s%s\n",
+	RvLogUpload("[upload] starting dump of %d files to http://%s:%s%s",
 		total, job->url.host, job->url.port, job->url.path);
 
-	// Phase 0: receiver health check. Empty POST /verify is treated as a ping by
-	// the receiver. If this fails, the receiver is down/hung/unreachable; abort
-	// the entire job — no uploads attempted, no files touched, no deletions.
+	// Phase 0: receiver health check. Empty POST /verify is treated as a ping
+	// by the receiver. If this fails, the receiver is down/hung/unreachable;
+	// abort the entire job — no uploads attempted, no files touched.
 	{
 		std::string ping;
 		int code = HttpPost(job->url, "/verify", nullptr, "text/plain", "", 0, &ping);
 		if (code != 200) {
-			UploadLog("[ReVoice Upload] ABORT: receiver health check failed (code=%d). "
-				"No files uploaded, no files deleted.\n", code);
+			RvLogUpload("[upload] ABORT: receiver health check failed (code=%d). "
+				"No files uploaded, no files deleted.", code);
 			delete job;
 			g_uploadInProgress = false;
 			return nullptr;
 		}
-		UploadLog("[ReVoice Upload] Receiver healthy, beginning upload\n");
+		RvLogUpload("[upload] receiver healthy, beginning upload");
 	}
 
 	std::vector<bool> uploaded(total, false);
 	std::vector<bool> confirmed(total, false);
 	int uploadedCount = 0;
 
-	// Phase 1: upload each file. A file that fails here is left on disk for the
-	// next rv_upload_dump to retry — we never delete a file that wasn't confirmed.
+	// Phase 1: upload each file. A file that fails here is left on disk for
+	// the next rv_upload_dump to retry — we never delete a file that wasn't
+	// confirmed.
 	for (int i = 0; i < total; i++) {
 		const std::string &fullPath = job->files[i].first;
 		const std::string &relPath  = job->files[i].second;
@@ -369,22 +415,27 @@ static void *UploadThreadFunc(void *arg)
 		if (UploadOneFile(job->url, fullPath.c_str(), relPath.c_str())) {
 			uploaded[i] = true;
 			uploadedCount++;
-			UploadLog("[ReVoice Upload] [%d/%d] OK: %s\n", i + 1, total, relPath.c_str());
+			RvLogUpload("[upload] [%d/%d] OK: %s", i + 1, total, relPath.c_str());
 		} else {
-			UploadLog("[ReVoice Upload] [%d/%d] FAIL: %s\n", i + 1, total, relPath.c_str());
+			RvLogUpload("[upload] [%d/%d] FAIL: %s", i + 1, total, relPath.c_str());
 		}
 	}
 
-	// Phase 2: ask the receiver to confirm which uploads actually landed on disk.
-	// Body is one relpath per line; response is "OK <relpath>" / "MISSING <relpath>"
-	// per line. A file is only deleted locally if the receiver explicitly confirms it.
+	// Phase 2: ask the receiver to confirm which uploads actually landed on
+	// disk. Body is one relpath per line; response is "OK <relpath>" /
+	// "MISSING <relpath>" per line. A file is only deleted locally if the
+	// receiver explicitly confirms it.
 	int confirmedCount = 0;
 	if (uploadedCount > 0) {
 		std::string verifyBody;
 		verifyBody.reserve((size_t)uploadedCount * 80);
+		std::string encoded;
 		for (int i = 0; i < total; i++) {
 			if (uploaded[i]) {
-				verifyBody += job->files[i].second;
+				// Same percent-encoding scheme as the X-Filepath header,
+				// so the receiver decodes both via urllib.parse.unquote().
+				PercentEncode(job->files[i].second.c_str(), encoded);
+				verifyBody += encoded;
 				verifyBody += '\n';
 			}
 		}
@@ -401,7 +452,6 @@ static void *UploadThreadFunc(void *arg)
 				size_t len = (eol == std::string::npos ? verifyResp.size() : eol) - pos;
 				if (len >= 3 && verifyResp.compare(pos, 3, "OK ") == 0) {
 					std::string p = verifyResp.substr(pos + 3, len - 3);
-					// Trim possible trailing '\r' if the receiver uses CRLF.
 					if (!p.empty() && p[p.size() - 1] == '\r') p.resize(p.size() - 1);
 					confirmedSet.insert(p);
 				}
@@ -415,13 +465,13 @@ static void *UploadThreadFunc(void *arg)
 				}
 			}
 		} else {
-			UploadLog("[ReVoice Upload] /verify request failed (code=%d) — no files will be deleted\n", code);
+			RvLogUpload("[upload] /verify request failed (code=%d) — no files will be deleted", code);
 		}
 	}
 
 	// Phase 3: delete confirmed files locally.
-	// IMPORTANT: deletion is currently disabled for testing. Once the verify path
-	// has been validated end-to-end, uncomment the unlink() below.
+	// IMPORTANT: deletion is currently disabled for testing. Once the verify
+	// path has been validated end-to-end, uncomment the unlink() below.
 	for (int i = 0; i < total; i++) {
 		if (!confirmed[i]) continue;
 		const std::string &fullPath = job->files[i].first;
@@ -430,7 +480,7 @@ static void *UploadThreadFunc(void *arg)
 	}
 
 	double percent = total > 0 ? (100.0 * confirmedCount / total) : 0.0;
-	UploadLog("[ReVoice Upload] Done: uploaded=%d/%d, confirmed=%d/%d (%.1f%%)\n",
+	RvLogUpload("[upload] done: uploaded=%d/%d, confirmed=%d/%d (%.1f%%)",
 		uploadedCount, total, confirmedCount, total, percent);
 
 	delete job;
@@ -438,8 +488,120 @@ static void *UploadThreadFunc(void *arg)
 	return nullptr;
 }
 
+// ── Auto-dump scheduler ─────────────────────────────────────────────────
+// Persisted state lives in this file. Format: a single line "YYYY-MM-DD\n"
+// recording the local calendar date of the last auto-trigger. Manual
+// rv_upload_dump invocations do NOT touch this file — they are independent
+// of the auto schedule.
+static const char *AUTO_DUMP_STATE_PATH = "cstrike/addons/amxmodx/logs/rv_last_dump.txt";
+
+// Earliest local hour-of-day at which an auto-dump is allowed to fire on
+// a day change. Pinned at 04:00 so the heavy work happens when no players
+// are on the server.
+static const int AUTO_DUMP_HOUR_GATE = 4;
+
+// Read the persisted last-dump date into `out` ("YYYY-MM-DD\0", 11 bytes).
+// Returns true on success, false on absent/unreadable/malformed file.
+// On every exit path the FILE* is closed — no fd leak even on early bails.
+static bool AutoDump_ReadLastDate(char out[11])
+{
+	FILE *f = fopen(AUTO_DUMP_STATE_PATH, "rb");
+	if (!f) return false;
+
+	char buf[32] = {0};
+	size_t rd = fread(buf, 1, sizeof(buf) - 1, f);
+	fclose(f);
+	if (rd == 0) return false;
+	buf[rd] = '\0';
+
+	// Trim trailing whitespace / newline so we tolerate hand-edited files.
+	for (size_t i = 0; i < rd; i++) {
+		char c = buf[i];
+		if (c == '\r' || c == '\n' || c == ' ' || c == '\t') { buf[i] = '\0'; break; }
+	}
+
+	// Must be exactly "YYYY-MM-DD". A malformed file is treated as "no
+	// record" → triggers an immediate dump on the next call. That's
+	// fail-open, which matches the user-requested "missing file => fire"
+	// behaviour.
+	if (strlen(buf) != 10) return false;
+
+	memcpy(out, buf, 11);
+	return true;
+}
+
+// Overwrite the last-dump date file. Failures are logged but not fatal —
+// at worst we'll try to fire again on the next map change today, and
+// Cmd_UploadDump's g_uploadInProgress guard prevents overlapping workers.
+static void AutoDump_WriteLastDate(const char *dateStr)
+{
+	FILE *f = fopen(AUTO_DUMP_STATE_PATH, "wb");
+	if (!f) {
+		RvLog("[AUTO] WARN cannot open %s for write: errno=%d",
+			AUTO_DUMP_STATE_PATH, errno);
+		return;
+	}
+	fwrite(dateStr, 1, strlen(dateStr), f);
+	fputc('\n', f);
+	fclose(f);
+}
+
+void Revoice_AutoDump_MaybeTrigger()
+{
+	if (!g_pcv_rev_auto_upload_dump || g_pcv_rev_auto_upload_dump->value == 0.0f)
+		return;
+
+	time_t now = time(nullptr);
+	struct tm tmvBuf;
+	struct tm *tmv = localtime_r(&now, &tmvBuf);
+	if (!tmv) return;
+
+	char todayStr[11];   // "YYYY-MM-DD\0"
+	snprintf(todayStr, sizeof(todayStr), "%04d-%02d-%02d",
+		tmv->tm_year + 1900, tmv->tm_mon + 1, tmv->tm_mday);
+
+	char lastStr[11] = {0};
+	bool haveLast = AutoDump_ReadLastDate(lastStr);
+
+	// Decision:
+	//   no file              → trigger
+	//   file == today        → skip (already done today)
+	//   file != today, h>=4  → trigger
+	//   file != today, h<4   → skip (still pre-dawn; wait)
+	bool shouldTrigger = false;
+	if (!haveLast) {
+		shouldTrigger = true;
+		RvLog("[AUTO] no state file at %s — firing initial dump (today=%s)",
+			AUTO_DUMP_STATE_PATH, todayStr);
+	} else if (strcmp(lastStr, todayStr) == 0) {
+		return;  // already fired today
+	} else if (tmv->tm_hour >= AUTO_DUMP_HOUR_GATE) {
+		shouldTrigger = true;
+		RvLog("[AUTO] date rolled %s -> %s (hour=%d >= gate=%d) — firing dump",
+			lastStr, todayStr, tmv->tm_hour, AUTO_DUMP_HOUR_GATE);
+	} else {
+		// new day but still before 04:00 — wait
+		return;
+	}
+
+	if (!shouldTrigger) return;
+
+	// Persist the new date BEFORE triggering. If we wrote it AFTER and the
+	// engine crashed/restarted during the upload, we'd re-fire on every map
+	// change for the rest of today. Writing first is the conservative
+	// choice — if the user wants to retry today after a known failure, they
+	// can always invoke `rv_upload_dump` manually (which is independent of
+	// the state file).
+	AutoDump_WriteLastDate(todayStr);
+
+	Cmd_UploadDump();
+}
+
 void Cmd_UploadDump()
 {
+	// All console output for the cmd-trigger phase goes to the main game
+	// thread's console only — we are still on the main thread here. The
+	// worker takes over for the rest via RvLogUpload.
 	SERVER_PRINT("[ReVoice Upload] rv_upload_dump invoked\n");
 
 	if (g_uploadInProgress) {

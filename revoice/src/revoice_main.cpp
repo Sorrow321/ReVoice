@@ -1,9 +1,10 @@
 #include "precompiled.h"
-// Upload subsystem temporarily disabled while we isolate the wav-save + ASR
-// crash. The header is not included so any accidental call to
-// Revoice_Upload_DrainLog / Cmd_UploadDump etc. fails to compile rather
-// than silently re-introducing the disabled path.
-// #include "revoice_upload.h"
+// Upload subsystem: cmd-triggered only. The module exposes a single entry
+// point (Cmd_UploadDump) that is registered as a server command in
+// Revoice_Load. There is no per-frame work, no hook, no auto-init — if
+// nobody types `rv_upload_dump` in the console, none of revoice_upload.cpp
+// runs (apart from passive static-global zero-init at module load).
+#include "revoice_upload.h"
 #include <stdlib.h>
 
 // Server-cmd handlers temporarily disabled to isolate the wav-save + ASR path:
@@ -327,6 +328,14 @@ void ClientCommand_PreHook(edict_t *pEntity)
 void ServerActivate_PostHook(edict_t *pEdictList, int edictCount, int clientMax)
 {
 	Revoice_Exec_Config();
+
+	// Once-per-map-boundary check for the auto-dump scheduler. This is the
+	// only place outside the explicit `rv_upload_dump` command that can
+	// reach Cmd_UploadDump — and even then, only when REV_AutoUploadDump=1
+	// AND today's calendar date hasn't been dumped yet AND it is past 04:00.
+	// If REV_AutoUploadDump is 0 (the default), this is a one-cvar-read no-op.
+	Revoice_AutoDump_MaybeTrigger();
+
 	SET_META_RESULT(MRES_IGNORED);
 }
 
@@ -358,9 +367,10 @@ void StartFrame_PreHook()
 	// Periodic state snapshot to RV*.log. Self-rate-limits to ~30s.
 	Revoice_LogHeartbeatTick();
 
-	// Upload-thread log drain — disabled (no upload thread runs while
-	// rv_upload_dump is unregistered).
-	// Revoice_Upload_DrainLog();
+	// Note: the external dumper subsystem deliberately does *not* hook
+	// into this frame loop. The upload worker writes its own log lines
+	// directly (RvLogUpload → RV_upload_YYYYMMDD.log), so there is no
+	// per-frame queue-drain to maintain here.
 
 	RETURN_META(MRES_IGNORED);
 }
@@ -412,13 +422,13 @@ bool Revoice_Load()
 	// Disabled while we isolate the wav-save + ASR path:
 	//   g_engfuncs.pfnAddServerCommand("sv_voice_volume", Cmd_VoiceVolume);
 	//   g_engfuncs.pfnAddServerCommand("sv_voice_pitch",  Cmd_VoicePitch);
-	//   g_engfuncs.pfnAddServerCommand("rv_upload_dump",  Cmd_UploadDump);
 	g_engfuncs.pfnAddServerCommand("rv_asr_record", Cmd_AsrRecord);
 
-	// Disabled: external dumper subsystem (RecoverOrphanedRecordings is
-	// also unnecessary now — the new wav writer never produces M_*.wav
-	// orphans because no file is on disk until it is fully written).
-	// Revoice_Upload_Init();
+	// External dumper subsystem — registered only as a server cmd. No
+	// init function, no per-frame work, no listeners. The worker thread
+	// is spawned only inside Cmd_UploadDump and logs to its own file
+	// (RV_upload_YYYYMMDD.log) via RvLogUpload.
+	g_engfuncs.pfnAddServerCommand("rv_upload_dump", Cmd_UploadDump);
 
 	if (!Revoice_Main_Init()) {
 		LCPrintf(true, "Initialization failed\n");

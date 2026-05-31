@@ -1,25 +1,33 @@
 #pragma once
 
-// Best-effort line-buffered logger to cstrike/addons/metamod/logs/RVYYYYMMDD.log.
+// Best-effort line-buffered loggers writing to date-stamped files under
+//   cstrike/addons/amxmodx/logs/
+//
+//   RvLog        →  RVYYYYMMDD.log         (main game thread; includes sv=time)
+//   RvLogUpload  →  RV_upload_YYYYMMDD.log (background upload worker thread; no sv=)
 //
 // Design goals:
-//   - The logger must never crash. Any failure (fopen denied, format too long,
-//     stat() errno = anything) is silently dropped. Diagnostic logging that
-//     can take down the server is worse than no logging.
-//   - One open + one write + one close per line. No persistent FILE* state to
-//     corrupt; no date-rollover detection needed (the filename is recomputed
-//     from wall-clock each call).
-//   - Single-threaded use only. The current build has no live worker threads
-//     reaching this (the upload subsystem is disabled). If a worker thread
-//     is ever re-introduced, wrap RvLog under the same mutex it uses.
-//   - Format strings must be string literals at the call site, never user
-//     input. vsnprintf with %s + a NULL pointer is undefined behaviour, so
-//     callers must guard ("name ? name : \"(null)\"").
+//   - Logging must never crash the engine. Any failure (fopen denied,
+//     format too long, gettimeofday error) is silently dropped.
+//   - One fopen + one write + one fclose per line. No persistent FILE*
+//     state to corrupt; no date-rollover detection needed.
+//   - Both functions are thread-safe with respect to each other and
+//     to themselves: they use localtime_r (not localtime), they write
+//     to different files, and atomic-append (O_APPEND, <PIPE_BUF=4096)
+//     keeps concurrent fwrite() calls from interleaving.
+//   - Caller-supplied format strings must be string literals; %s args
+//     must be guarded against NULL ("name ? name : \"(null)\"").
 //
-// File path: cstrike/addons/amxmodx/logs/RVYYYYMMDD.log
-// Line format: [HH:MM:SS.mmm sv=12.345] <message>\n
+// The upload variant intentionally omits sv= because reading
+// g_RehldsSv->GetTime() from a non-main thread is racy on 32-bit
+// builds (8-byte double, non-atomic). The main thread uses sv= for
+// correlation with frame-time events; the worker has nothing to
+// correlate it against.
+
 #if defined(__GNUC__) || defined(__clang__)
-void RvLog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void RvLog(const char *fmt, ...)       __attribute__((format(printf, 1, 2)));
+void RvLogUpload(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 #else
 void RvLog(const char *fmt, ...);
+void RvLogUpload(const char *fmt, ...);
 #endif
