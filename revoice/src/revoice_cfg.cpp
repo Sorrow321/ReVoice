@@ -45,6 +45,8 @@ cvar_t g_cv_rev_playback_lp_hz = { "REV_PlaybackLowpassHz", "3800", 0, 0.0f, nul
 cvar_t g_cv_rev_playvoice_client = { "REV_PlayvoiceClient", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_bot_name = { "REV_PlaybackBotName", "vk.com/laguna_games", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_active = { "REV_PlaybackActive", "0", 0, 0.0f, nullptr }; // status flag for AMXX (set by plugin)
+cvar_t g_cv_rev_playback_volume = { "REV_PlaybackVolume", "1.0", 0, 0.0f, nullptr }; // bot-playback volume (1.0 = 100%)
+cvar_t g_cv_rev_playback_speed  = { "REV_PlaybackSpeed",  "1.0", 0, 0.0f, nullptr }; // bot-playback speed (tape-style)
 cvar_t g_cv_rev_voicecmd_verbose = { "REV_VoiceCmdVerbose", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_upload_url        = { "REV_UploadURL", "", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_debug_log         = { "REV_DebugLog", "1", 0, 0.0f, nullptr };
@@ -64,6 +66,8 @@ cvar_t *g_pcv_rev_playback_lp_hz = nullptr;
 cvar_t *g_pcv_rev_playvoice_client = nullptr;
 cvar_t *g_pcv_rev_playback_bot_name = nullptr;
 cvar_t *g_pcv_rev_playback_active = nullptr;
+cvar_t *g_pcv_rev_playback_volume = nullptr;
+cvar_t *g_pcv_rev_playback_speed  = nullptr;
 cvar_t *g_pcv_rev_voicecmd_verbose = nullptr;
 cvar_t *g_pcv_rev_upload_url        = nullptr;
 cvar_t *g_pcv_rev_debug_log         = nullptr;
@@ -88,6 +92,8 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playvoice_client);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_bot_name);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_active);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_volume);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_speed);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_voicecmd_verbose);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_upload_url);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_debug_log);
@@ -107,6 +113,8 @@ void Revoice_Init_Cvars()
 	g_pcv_rev_playvoice_client = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playvoice_client.name);
 	g_pcv_rev_playback_bot_name = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_bot_name.name);
 	g_pcv_rev_playback_active = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_active.name);
+	g_pcv_rev_playback_volume = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_volume.name);
+	g_pcv_rev_playback_speed  = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_speed.name);
 	g_pcv_rev_voicecmd_verbose = g_engfuncs.pfnCVarGetPointer(g_cv_rev_voicecmd_verbose.name);
 	g_pcv_rev_upload_url        = g_engfuncs.pfnCVarGetPointer(g_cv_rev_upload_url.name);
 	g_pcv_rev_debug_log         = g_engfuncs.pfnCVarGetPointer(g_cv_rev_debug_log.name);

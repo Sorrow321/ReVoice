@@ -30,7 +30,9 @@ extern cvar_t *g_pcv_rev_opus_complexity;
 extern cvar_t *g_pcv_rev_playback_lp_hz;
 extern cvar_t *g_pcv_rev_playvoice_client;
 extern cvar_t *g_pcv_rev_playback_bot_name;
-extern cvar_t *g_pcv_rev_playback_active;  // read-only status flag for external tools (AMXX): 1 = playing, 0 = idle
+extern cvar_t *g_pcv_rev_playback_active;  // read-only status flag for external tools (AMXX): 0 stopped / 1 playing / 2 paused
+extern cvar_t *g_pcv_rev_playback_volume;  // bot-playback volume multiplier (1.0 = 100%); bot path only
+extern cvar_t *g_pcv_rev_playback_speed;   // bot-playback speed (tape-style, pitch shifts); bot path only
 extern cvar_t *g_pcv_rev_voicecmd_verbose;
 extern cvar_t *g_pcv_rev_upload_url;
 extern cvar_t *g_pcv_rev_debug_log;        // 1 = write RVYYYYMMDD.log diagnostics; 0 = silence

@@ -661,20 +661,22 @@ bool CVoicePlayback::SeekRelative(double seconds)
 	if (bytesPerSec <= 0)
 		return false;
 
-	long delta = (long)(seconds * (double)bytesPerSec);
-	long newPos = (long)m_State.dataPos + delta;
-
-	if (newPos < 0)
-		newPos = 0;                       // seeking before the start -> beginning
-	newPos -= (newPos % bytesPerSample);  // align to a whole sample frame
+	// Compute the target in double to avoid signed-overflow on extreme seek values
+	// (e.g. an rcon 'sv_voiceseek 999999999'); dataPos/dataSize fit exactly in double.
+	double newPosD = (double)m_State.dataPos + seconds * (double)bytesPerSec;
+	if (newPosD < 0.0)
+		newPosD = 0.0;                    // seeking before the start -> beginning
 
 	// At/past the end -> let Update() emit the final frame and stop cleanly next tick.
-	if ((unsigned int)newPos >= m_State.dataSize) {
+	if (newPosD >= (double)m_State.dataSize) {
 		m_State.dataPos = m_State.dataSize;
 		m_State.pcm8kCarrySamples = 0;
 		REV_ResetPlaybackVoiceQueues();
 		return true;
 	}
+
+	long newPos = (long)newPosD;
+	newPos -= (newPos % bytesPerSample);  // align to a whole sample frame
 
 	if (m_State.dataStart < 0)
 		return false; // ftell failed at open; cannot seek safely
@@ -764,6 +766,14 @@ void CVoicePlayback::Update()
 	const double frameSec = (chunkDurationMs / 1000.0);
 	const int carryCap = (int)(sizeof(m_State.pcm8kCarry) / sizeof(m_State.pcm8kCarry[0]));
 
+	// Bot-playback speed (tape-style: pitch shifts with speed). Read live so menu
+	// changes take effect mid-song. Clamped to the range the read buffers are sized for.
+	float playbackSpeed = 1.0f;
+	if (g_pcv_rev_playback_speed && g_pcv_rev_playback_speed->value > 0.0f)
+		playbackSpeed = g_pcv_rev_playback_speed->value;
+	if (playbackSpeed < 0.5f) playbackSpeed = 0.5f;
+	if (playbackSpeed > 2.0f) playbackSpeed = 2.0f;
+
 	// Debug counters (1 line/sec when REV_PlaybackDebug=1)
 	static double s_dbgNextPrintTime = 0.0;
 	static int s_dbgFramesSent = 0;
@@ -780,12 +790,16 @@ void CVoicePlayback::Update()
 		if (++prefetchIters > 8)
 			break;
 
-		// Calculate how many bytes to read from source for approximately one output frame duration.
-		int sourceSamples = (m_State.sampleRate * chunkDurationMs) / 1000;
+		// Calculate how many source samples make up one output frame duration. At speed S
+		// we consume S times as much source per real-time frame (then resample it down into
+		// the same 8 kHz frame), which speeds playback up/down and shifts pitch like tape.
+		int sourceSamples = (int)(((m_State.sampleRate * chunkDurationMs) / 1000) * playbackSpeed);
+		if (sourceSamples < 1) sourceSamples = 1;
 		int bytesPerSample = (m_State.bitsPerSample / 8) * m_State.channels;
 		int chunkSize = sourceSamples * bytesPerSample;
 
-		const int kMaxRead = 16384;
+		// Sized so a full frame at the worst case (100 ms, 48 kHz, stereo16, 2x) still fits.
+		const int kMaxRead = 49152;
 		if (chunkSize > kMaxRead) {
 			chunkSize = kMaxRead;
 			sourceSamples = chunkSize / bytesPerSample;
@@ -799,14 +813,14 @@ void CVoicePlayback::Update()
 
 		// static: Update() runs once per server frame (single-threaded, non-reentrant),
 		// so keeping these large scratch buffers off the per-frame stack is safe.
-		static char audioBuffer[16384];
+		static char audioBuffer[49152];
 		size_t bytesRead = fread(audioBuffer, 1, (size_t)chunkSize, m_State.file);
 		m_State.dataPos += (unsigned int)bytesRead;
 		if (bytesRead == 0)
 			break;
 
 		// Convert to 16-bit PCM if needed
-		static short pcm16Buffer[16384];
+		static short pcm16Buffer[49152];
 		int numSourceSamples = 0;
 		if (m_State.bitsPerSample == 8) {
 			numSourceSamples = (int)bytesRead;
@@ -820,8 +834,12 @@ void CVoicePlayback::Update()
 		}
 
 		static short pcm8k[2048];
+		// Resampling at (sampleRate * speed) maps the S-times-larger source chunk back into
+		// one ~FRAME_SAMPLES_8K output frame, so output size stays bounded regardless of speed.
+		int resampleInputRate = (int)(m_State.sampleRate * playbackSpeed);
+		if (resampleInputRate < 1) resampleInputRate = 1;
 		int numSamples8k = ConvertToMonoResample(
-			pcm16Buffer, numSourceSamples, m_State.sampleRate, m_State.channels,
+			pcm16Buffer, numSourceSamples, resampleInputRate, m_State.channels,
 			pcm8k, (int)(sizeof(pcm8k) / sizeof(pcm8k[0])), 8000
 		);
 		// Low-pass to remove >4 kHz content now that we're at 8 kHz (Nyquist 4 kHz).
@@ -833,10 +851,17 @@ void CVoicePlayback::Update()
 				if (cutoffHz < 1000.0f) cutoffHz = 1000.0f; // keep it reasonable
 			}
 			ApplyLowpass8k(pcm8k, numSamples8k, cutoffHz, 8000.0f, m_State.lowpassState);
-			// Apply volume scaling
-			if (m_State.volume != 1.0f) {
+			// Apply volume scaling. Effective volume = the StartPlayback arg (m_State.volume,
+			// 1.0 for the menu path / sv_playvoice) times the live REV_PlaybackVolume cvar.
+			// Read live so menu changes take effect mid-song. Bot path only.
+			float vol = m_State.volume;
+			if (g_pcv_rev_playback_volume)
+				vol *= g_pcv_rev_playback_volume->value;
+			if (vol < 0.0f) vol = 0.0f;
+			if (vol > 4.0f) vol = 4.0f;
+			if (vol != 1.0f) {
 				for (int i = 0; i < numSamples8k; i++) {
-					float v = (float)pcm8k[i] * m_State.volume;
+					float v = (float)pcm8k[i] * vol;
 					if (v > 32767.0f) v = 32767.0f;
 					if (v < -32768.0f) v = -32768.0f;
 					pcm8k[i] = (short)v;
@@ -1056,7 +1081,7 @@ void Cmd_StopVoice()
 	}
 	g_VoicePlayback.StopPlayback();
 	SERVER_PRINT("[ReVoice] sv_stopvoice: playback stopped\n");
-	RvLogAction("Player %s stopped music", actor);
+	RvLogAction("%s stopped music", actor);
 }
 
 // Seek relative: sv_voiceseek <seconds> [actor] (e.g. 10 forward, -10 backward).
@@ -1080,10 +1105,10 @@ void Cmd_VoiceSeek()
 	char msg[128];
 	if (g_VoicePlayback.SeekRelative(seconds)) {
 		snprintf(msg, sizeof(msg), "[ReVoice] sv_voiceseek: seeked %.1fs\n", seconds);
-		RvLogAction("Player %s seeked music %.1fs", actor, seconds);
+		RvLogAction("%s seeked music %.1fs", actor, seconds);
 	} else {
 		snprintf(msg, sizeof(msg), "[ReVoice] sv_voiceseek: failed\n");
-		RvLogAction("Player %s FAILED to seek music %.1fs", actor, seconds);
+		RvLogAction("%s FAILED to seek music %.1fs", actor, seconds);
 	}
 	SERVER_PRINT(msg);
 }
@@ -1095,7 +1120,7 @@ void Cmd_PauseVoice()
 
 	if (g_VoicePlayback.Pause()) {
 		SERVER_PRINT("[ReVoice] sv_pausevoice: paused\n");
-		RvLogAction("Player %s paused music", actor);
+		RvLogAction("%s paused music", actor);
 	} else {
 		SERVER_PRINT("[ReVoice] sv_pausevoice: nothing to pause\n");
 	}
@@ -1108,7 +1133,7 @@ void Cmd_ResumeVoice()
 
 	if (g_VoicePlayback.Resume()) {
 		SERVER_PRINT("[ReVoice] sv_resumevoice: resumed\n");
-		RvLogAction("Player %s resumed music", actor);
+		RvLogAction("%s resumed music", actor);
 	} else {
 		SERVER_PRINT("[ReVoice] sv_resumevoice: nothing to resume\n");
 	}
@@ -1138,7 +1163,7 @@ void Cmd_PlayVoice()
 
 	if (playerIndex == -1) {
 		SERVER_PRINT("[ReVoice] ERROR: No connected players to emit voice from\n");
-		RvLogAction("Player %s FAILED to start music (no emitter bot): %s", actor, filename);
+		RvLogAction("%s FAILED to start music (no emitter bot): %s", actor, filename);
 		return;
 	}
 
@@ -1152,9 +1177,9 @@ void Cmd_PlayVoice()
 
 	if (!g_VoicePlayback.StartPlayback(filename, playerIndex, 1.0f, nullptr)) {
 		SERVER_PRINT("[ReVoice] Failed to start playback\n");
-		RvLogAction("Player %s FAILED to start music: %s", actor, filename);
+		RvLogAction("%s FAILED to start music: %s", actor, filename);
 	} else {
-		RvLogAction("Player %s started music: %s", actor, filename);
+		RvLogAction("%s started music: %s", actor, filename);
 	}
 }
 
