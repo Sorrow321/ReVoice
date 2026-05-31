@@ -490,6 +490,10 @@ static void *UploadThreadFunc(void *arg)
 	// exists on the receiver, so that's the intended behaviour.
 	int deletedCount = 0;
 	int unlinkErrors = 0;
+	// Parent directories of every successfully-unlinked file. std::set
+	// dedupes (one dir typically contains many wavs) and keeps memory
+	// bounded by number of distinct players, not number of files.
+	std::set<std::string> emptiedDirs;
 	for (int i = 0; i < total; i++) {
 		if (!confirmed[i]) continue;
 		const std::string &fullPath = job->files[i].first;
@@ -497,6 +501,9 @@ static void *UploadThreadFunc(void *arg)
 			deletedCount++;
 			RvLogUpload("[upload] [%d/%d] deleted: %s",
 				deletedCount, confirmedCount, fullPath.c_str());
+			size_t slash = fullPath.find_last_of('/');
+			if (slash != std::string::npos)
+				emptiedDirs.insert(fullPath.substr(0, slash));
 		} else {
 			unlinkErrors++;
 			RvLogUpload("[upload] WARN unlink failed: %s (errno=%d)",
@@ -504,9 +511,36 @@ static void *UploadThreadFunc(void *arg)
 		}
 	}
 
+	// Remove now-empty per-player subdirectories. rmdir() refuses to
+	// remove a non-empty directory (ENOTEMPTY), so it's self-policing:
+	// if a directory still contains an in-progress recording, a wav we
+	// failed to confirm, or any other file, it stays untouched.
+	//
+	// SAFETY — explicit floor: never remove "cstrike/data" itself or any
+	// shorter path. ScanWavFiles only ever produces paths under
+	// "cstrike/data/<auth>/<file>.wav", so the only parents that reach
+	// here are "cstrike/data/<auth>", which is exactly what we want to
+	// clean up. The startsWith check is belt-and-suspenders.
+	int dirsRemoved = 0;
+	for (const std::string &d : emptiedDirs) {
+		if (d.compare(0, 13, "cstrike/data/") != 0) continue;  // not under our root
+		if (d == "cstrike/data") continue;                      // is our root
+		if (rmdir(d.c_str()) == 0) {
+			dirsRemoved++;
+			RvLogUpload("[upload] removed empty dir: %s", d.c_str());
+		}
+		// Common failure modes:
+		//   ENOTEMPTY: directory still has files (e.g., in-progress wav,
+		//              an unconfirmed leftover). Correct outcome — keep it.
+		//   ENOENT:    something else removed it between unlink and rmdir.
+		//              No problem.
+		//   EACCES / EBUSY: rare, leave alone. Manual cleanup if needed.
+	}
+
 	double percent = total > 0 ? (100.0 * confirmedCount / total) : 0.0;
-	RvLogUpload("[upload] done: uploaded=%d/%d, confirmed=%d/%d (%.1f%%), deleted=%d, unlink_errors=%d",
-		uploadedCount, total, confirmedCount, total, percent, deletedCount, unlinkErrors);
+	RvLogUpload("[upload] done: uploaded=%d/%d, confirmed=%d/%d (%.1f%%), deleted=%d, dirs_removed=%d, unlink_errors=%d",
+		uploadedCount, total, confirmedCount, total, percent,
+		deletedCount, dirsRemoved, unlinkErrors);
 
 	delete job;
 	g_uploadInProgress = false;
