@@ -15,6 +15,7 @@ private:
 		int bitsPerSample;
 		unsigned int dataSize;
 		unsigned int dataPos;
+		long dataStart;   // absolute file offset of the WAV 'data' payload (for seeking)
 		int targetPlayerIndex;
 		double nextChunkTime;
 		bool active;
@@ -56,6 +57,11 @@ public:
 	
 	// Stop current playback
 	void StopPlayback();
+
+	// Seek relative to the current position by +/- seconds. Clamps to [start, end]:
+	// seeking before the start snaps to the beginning; seeking past the end ends playback
+	// cleanly. No-op (returns false) if nothing is currently playing.
+	bool SeekRelative(double seconds);
 	
 	// Called each frame to process playback
 	void Update();
@@ -72,5 +78,7 @@ void Revoice_VoicePlayback_Init();
 // Command handlers
 void Cmd_PlayVoice();
 void Cmd_PlayVoice_Ex();
+void Cmd_StopVoice();
+void Cmd_VoiceSeek();
 void Cmd_PlayVoice_Client(edict_t* pEntity);
 

@@ -314,12 +314,15 @@ qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char
 
 void ClientCommand_PreHook(edict_t *pEntity)
 {
-	// Client-driven "playvoice" command (gated server-side by REV_PlayVoiceClient).
-	const char* cmd = CMD_ARGV(0);
-	if (cmd && _stricmp(cmd, "playvoice") == 0) {
-		Cmd_PlayVoice_Client(pEntity);
-		RETURN_META(MRES_SUPERCEDE);
-	}
+	// Client-driven playback commands are intentionally DISABLED. All playback control
+	// is exposed to players through a separate AMXX plugin (menu) which drives the
+	// server-console commands (sv_playvoice / sv_stopvoice / sv_voiceseek). The handler
+	// below is kept (commented) for direct debugging only.
+	// const char* cmd = CMD_ARGV(0);
+	// if (cmd && _stricmp(cmd, "playvoice") == 0) {
+	//     Cmd_PlayVoice_Client(pEntity);
+	//     RETURN_META(MRES_SUPERCEDE);
+	// }
 
 	RETURN_META(MRES_IGNORED);
 }

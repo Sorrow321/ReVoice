@@ -694,3 +694,8 @@ FodyWeavers.xsd
 
 
 latest_receiver.py
+
+# Downstream / server-side plugins kept local — this repo is public and these
+# should not be exposed: AMXX scripts and Python tooling.
+*.sma
+*.py

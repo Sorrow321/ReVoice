@@ -591,6 +591,7 @@ bool CVoicePlayback::StartPlayback(const char* filename, int playerIndex, float 
 	m_State.bitsPerSample = bitsPerSample;
 	m_State.dataSize = dataSize;
 	m_State.dataPos = 0;
+	m_State.dataStart = ftell(file); // file is positioned at start of 'data' payload here
 	m_State.targetPlayerIndex = playerIndex;
 	m_State.nextChunkTime = g_RehldsSv->GetTime();
 	m_State.active = true;
@@ -608,9 +609,13 @@ bool CVoicePlayback::StartPlayback(const char* filename, int playerIndex, float 
 	m_State.lowpassState = 0.0f;
 	REV_ResetPlaybackVoiceQueues();
 	
+	// Publish "playing" status for external tools (AMXX menu reads this cvar).
+	if (g_pcv_rev_playback_active)
+		g_engfuncs.pfnCVarSetFloat(g_pcv_rev_playback_active->name, 1.0f);
+
 	snprintf(msg, sizeof(msg), "[ReVoice Playback] SUCCESS: Playback started for %s\n", filename);
 	SERVER_PRINT(msg);
-	
+
 	return true;
 }
 
@@ -622,6 +627,10 @@ void CVoicePlayback::StopPlayback()
 	}
 	m_State.active = false;
 	m_State.dataPos = 0;
+	m_State.dataStart = 0;
+	// Clear "playing" status for external tools (AMXX menu reads this cvar).
+	if (g_pcv_rev_playback_active)
+		g_engfuncs.pfnCVarSetFloat(g_pcv_rev_playback_active->name, 0.0f);
 	m_State.pcm8kCarrySamples = 0;
 	m_State.framesSinceReset = 0;
 	m_State.resetGapFramesRemaining = 0;
@@ -629,6 +638,51 @@ void CVoicePlayback::StopPlayback()
 	for (int i = 0; i < MAX_PLAYERS; i++) m_State.targetMask[i] = true;
 	m_State.lowpassState = 0.0f;
 	REV_ResetPlaybackVoiceQueues();
+}
+
+bool CVoicePlayback::SeekRelative(double seconds)
+{
+	// No-op if nothing is playing.
+	if (!m_State.active || !m_State.file)
+		return false;
+
+	int bytesPerSample = (m_State.bitsPerSample / 8) * m_State.channels;
+	if (bytesPerSample <= 0)
+		return false; // validated at StartPlayback, but stay defensive
+
+	long bytesPerSec = (long)m_State.sampleRate * bytesPerSample;
+	if (bytesPerSec <= 0)
+		return false;
+
+	long delta = (long)(seconds * (double)bytesPerSec);
+	long newPos = (long)m_State.dataPos + delta;
+
+	if (newPos < 0)
+		newPos = 0;                       // seeking before the start -> beginning
+	newPos -= (newPos % bytesPerSample);  // align to a whole sample frame
+
+	// At/past the end -> let Update() emit the final frame and stop cleanly next tick.
+	if ((unsigned int)newPos >= m_State.dataSize) {
+		m_State.dataPos = m_State.dataSize;
+		m_State.pcm8kCarrySamples = 0;
+		REV_ResetPlaybackVoiceQueues();
+		return true;
+	}
+
+	if (m_State.dataStart < 0)
+		return false; // ftell failed at open; cannot seek safely
+	if (fseek(m_State.file, m_State.dataStart + newPos, SEEK_SET) != 0)
+		return false;
+
+	// Drop everything buffered so no stale (pre-seek) audio plays after the jump.
+	m_State.dataPos = (unsigned int)newPos;
+	m_State.pcm8kCarrySamples = 0;
+	m_State.lowpassState = 0.0f;
+	m_State.resetGapFramesRemaining = 0;
+	REV_ResetPlaybackVoiceQueues();
+	// Resync the send schedule to "now" so we don't burst catch-up frames after the jump.
+	m_State.nextChunkTime = g_RehldsSv->GetTime();
+	return true;
 }
 
 void CVoicePlayback::Update()
@@ -939,8 +993,45 @@ void Revoice_VoicePlayback_Init()
 {
 	g_engfuncs.pfnAddServerCommand("sv_playvoice", Cmd_PlayVoice);
 	g_engfuncs.pfnAddServerCommand("sv_playvoice_ex", Cmd_PlayVoice_Ex);
+	g_engfuncs.pfnAddServerCommand("sv_stopvoice", Cmd_StopVoice);
+	g_engfuncs.pfnAddServerCommand("sv_voiceseek", Cmd_VoiceSeek);
 	g_VoicePlayback.InitCodecs();
-	SERVER_PRINT("[ReVoice] Voice playback commands registered: sv_playvoice, playvoice\n");
+	SERVER_PRINT("[ReVoice] Voice playback commands registered: sv_playvoice, sv_playvoice_ex, sv_stopvoice, sv_voiceseek\n");
+}
+
+// Stop current playback. No-op (with a note) if nothing is playing.
+void Cmd_StopVoice()
+{
+	if (!g_VoicePlayback.IsPlaying()) {
+		SERVER_PRINT("[ReVoice] sv_stopvoice: nothing is playing\n");
+		return;
+	}
+	g_VoicePlayback.StopPlayback();
+	SERVER_PRINT("[ReVoice] sv_stopvoice: playback stopped\n");
+}
+
+// Seek relative: sv_voiceseek <seconds> (e.g. 10 forward, -10 backward).
+// Guarded: does nothing if not currently playing; clamps to [start, end].
+void Cmd_VoiceSeek()
+{
+	if (!g_VoicePlayback.IsPlaying()) {
+		SERVER_PRINT("[ReVoice] sv_voiceseek: nothing is playing\n");
+		return;
+	}
+
+	const char* arg = CMD_ARGV(1);
+	if (!arg || !arg[0]) {
+		SERVER_PRINT("Usage: sv_voiceseek <seconds>   (e.g. 10 or -10)\n");
+		return;
+	}
+
+	double seconds = atof(arg);
+	char msg[128];
+	if (g_VoicePlayback.SeekRelative(seconds))
+		snprintf(msg, sizeof(msg), "[ReVoice] sv_voiceseek: seeked %.1fs\n", seconds);
+	else
+		snprintf(msg, sizeof(msg), "[ReVoice] sv_voiceseek: failed\n");
+	SERVER_PRINT(msg);
 }
 
 void Cmd_PlayVoice()
