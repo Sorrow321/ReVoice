@@ -4,7 +4,6 @@ CSteamP2PCodec::CSteamP2PCodec(IVoiceCodec *backend)
 {
 	m_BackendCodec = backend;
 	m_Client = nullptr;
-	m_SampleRate = 8000; // default; ReVoice encoders operate on 8 kHz PCM
 }
 
 bool CSteamP2PCodec::Init(int quality)
@@ -93,9 +92,8 @@ int CSteamP2PCodec::StreamEncode(const char *pUncompressedBytes, int nSamples, c
 	}
 
 	*(writePos++) = PLT_SamplingRate; // Set sampling rate
-	// Declared rate the receiving client uses to drive its decode/playout. Defaults to 8000
-	// (the encoders' actual rate) but is settable (real Opus clients declare 24000).
-	*(uint16 *)writePos = (uint16)m_SampleRate;
+	// ReVoice encoders in this repo operate on 8 kHz PCM (see VoiceEncoder_Opus, VoiceEncoder_Silk, VoiceEncoder_Speex).
+	*(uint16 *)writePos = 8000;
 	writePos += 2;
 
 	// Use a framed payload opcode that our decoder handles robustly (len-prefixed).

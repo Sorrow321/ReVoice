@@ -1,9 +1,7 @@
 #include "precompiled.h"
 
-VoiceEncoder_Opus::VoiceEncoder_Opus(int sampleRate) : m_bitrate(32000), m_samplerate(sampleRate)
+VoiceEncoder_Opus::VoiceEncoder_Opus() : m_bitrate(32000), m_samplerate(8000)
 {
-	m_frameSize = m_samplerate / 50;   // 20 ms
-	m_maxFrameSize = 3 * m_frameSize;
 	m_nEncodeSeq = 0;
 	m_nDecodeSeq = 0;
 	m_pEncoder = nullptr;
@@ -93,14 +91,14 @@ bool VoiceEncoder_Opus::ResetState()
 
 int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, char *pCompressed, int maxCompressedBytes, bool bFinal)
 {
-	if ((nSamplesIn + GetNumQueuedEncodingSamples()) < m_frameSize && !bFinal)
+	if ((nSamplesIn + GetNumQueuedEncodingSamples()) < FRAME_SIZE && !bFinal)
 	{
 		m_bufOverflowBytes.Put(pUncompressedIn, nSamplesIn * BYTES_PER_SAMPLE);
 		return 0;
 	}
 
 	int nSamples = nSamplesIn;
-	int nSamplesRemaining = nSamplesIn % m_frameSize;
+	int nSamplesRemaining = nSamplesIn % FRAME_SIZE;
 	char *pUncompressed = (char *)pUncompressedIn;
 
 	CUtlBuffer buf;
@@ -111,18 +109,18 @@ int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 		m_bufOverflowBytes.Clear();
 
 		nSamples = (buf.TellPut() / BYTES_PER_SAMPLE);
-		nSamplesRemaining = (buf.TellPut() / BYTES_PER_SAMPLE) % m_frameSize;
+		nSamplesRemaining = (buf.TellPut() / BYTES_PER_SAMPLE) % FRAME_SIZE;
 
 		if (bFinal && nSamplesRemaining)
 		{
 			// fill samples with silence
-			for (int i = m_frameSize - nSamplesRemaining; i > 0; i--)
+			for (int i = FRAME_SIZE - nSamplesRemaining; i > 0; i--)
 			{
 				buf.PutShort(0);
 			}
 
 			nSamples = (buf.TellPut() / BYTES_PER_SAMPLE);
-			nSamplesRemaining = (buf.TellPut() / BYTES_PER_SAMPLE) % m_frameSize;
+			nSamplesRemaining = (buf.TellPut() / BYTES_PER_SAMPLE) % FRAME_SIZE;
 		}
 
 		pUncompressed = (char *)buf.Base();
@@ -136,7 +134,7 @@ int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 	int nChunks = nSamples - nSamplesRemaining;
 	if (nChunks > 0)
 	{
-		int nRemainingSamples = (nChunks - 1) / m_frameSize + 1;
+		int nRemainingSamples = (nChunks - 1) / FRAME_SIZE + 1;
 		do
 		{
 			uint16 *pWritePayloadSize = (uint16 *)pWritePos;
@@ -149,12 +147,12 @@ int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 			}
 
 			int nBytes = ((pWritePosMax - pWritePos) < 0x7FFF) ? (pWritePosMax - pWritePos) : 0x7FFF;
-			int nWriteBytes = opus_encode(m_pEncoder, (const opus_int16 *)psRead, m_frameSize, (unsigned char *)pWritePos, nBytes);
+			int nWriteBytes = opus_encode(m_pEncoder, (const opus_int16 *)psRead, FRAME_SIZE, (unsigned char *)pWritePos, nBytes);
 
 			// Advance by exactly one frame of PCM.
-			// psRead is a byte pointer to 16-bit mono PCM, so increment by m_frameSize * BYTES_PER_SAMPLE.
-			// Using m_maxFrameSize here desynchronizes reads and causes periodic corruption over time.
-			psRead += m_frameSize * BYTES_PER_SAMPLE;
+			// psRead is a byte pointer to 16-bit mono PCM, so increment by FRAME_SIZE * BYTES_PER_SAMPLE.
+			// Using MAX_FRAME_SIZE here desynchronizes reads and causes periodic corruption over time.
+			psRead += FRAME_SIZE * BYTES_PER_SAMPLE;
 			pWritePos += nWriteBytes;
 
 			nRemainingSamples--;
@@ -225,13 +223,13 @@ int VoiceEncoder_Opus::Decompress(const char *pCompressed, int compressedBytes, 
 
 				for (int i = 0; i < nPacketLoss; i++)
 				{
-					if ((pWritePos + m_maxFrameSize) >= pWritePosMax)
+					if ((pWritePos + MAX_FRAME_SIZE) >= pWritePosMax)
 					{
 						Assert(false);
 						break;
 					}
 
-					int nBytes = opus_decode(m_pDecoder, 0, 0, (opus_int16 *)pWritePos, m_frameSize, 0);
+					int nBytes = opus_decode(m_pDecoder, 0, 0, (opus_int16 *)pWritePos, FRAME_SIZE, 0);
 					if (nBytes <= 0)
 					{
 						// raw corrupted
@@ -251,22 +249,22 @@ int VoiceEncoder_Opus::Decompress(const char *pCompressed, int compressedBytes, 
 			break;
 		}
 
-		if ((pWritePos + m_maxFrameSize) > pWritePosMax)
+		if ((pWritePos + MAX_FRAME_SIZE) > pWritePosMax)
 		{
 			Assert(false);
 			break;
 		}
 
-		memset(pWritePos, 0, m_maxFrameSize);
+		memset(pWritePos, 0, MAX_FRAME_SIZE);
 
 		if (nPayloadSize == 0)
 		{
 			// DTX (discontinued transmission)
-			pWritePos += m_maxFrameSize;
+			pWritePos += MAX_FRAME_SIZE;
 			continue;
 		}
 
-		int nBytes = opus_decode(m_pDecoder, (const unsigned char *)pReadPos, nPayloadSize, (opus_int16 *)pWritePos, m_frameSize, 0);
+		int nBytes = opus_decode(m_pDecoder, (const unsigned char *)pReadPos, nPayloadSize, (opus_int16 *)pWritePos, FRAME_SIZE, 0);
 		if (nBytes <= 0)
 		{
 			// raw corrupted
