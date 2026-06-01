@@ -96,6 +96,18 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 	srcPlayer->SetLastVoiceTime(g_RehldsSv->GetTime());
 	srcPlayer->IncreaseVoiceRate(nDataLength);
 
+	// Debug: dump a real talking player's voice packet header so it can be compared
+	// byte-for-byte against bot-playback packets (REV_VoiceDump 1).
+	if (g_pcv_rev_voice_dump && g_pcv_rev_voice_dump->value != 0.0f) {
+		char head[64]; int hn = (int)nDataLength < 16 ? (int)nDataLength : 16; int p = 0;
+		for (int i = 0; i < hn; i++)
+			p += snprintf(head + p, sizeof(head) - p, "%02X ", (unsigned char)chReceived[i]);
+		char msg[176];
+		snprintf(msg, sizeof(msg), "[VDUMP] REAL t=%.3f codec=%d len=%u head=[%s]\n",
+			g_RehldsSv->GetTime(), (int)srcPlayer->GetCodecType(), nDataLength, head);
+		SERVER_PRINT(msg);
+	}
+
 	char transcodedBuf[4096];
 
 	char *silkData = nullptr;

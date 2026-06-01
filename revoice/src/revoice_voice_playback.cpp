@@ -335,6 +335,18 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 		}
 	}
 
+	// Debug: dump our playback Opus packet header to compare against a real talking
+	// player's packet (REV_VoiceDump 1). Logged once per frame, not per recipient.
+	if (g_pcv_rev_voice_dump && g_pcv_rev_voice_dump->value != 0.0f && opusBuf && opusLen > 0) {
+		char head[64]; int hn = opusLen < 16 ? opusLen : 16; int p = 0;
+		for (int i = 0; i < hn; i++)
+			p += snprintf(head + p, sizeof(head) - p, "%02X ", (unsigned char)opusBuf[i]);
+		char msg[176];
+		snprintf(msg, sizeof(msg), "[VDUMP] PLAY t=%.3f codec=%d len=%d head=[%s]\n",
+			g_RehldsSv->GetTime(), (int)vct_opus, opusLen, head);
+		SERVER_PRINT(msg);
+	}
+
 	// Broadcast to all clients (bypass voice stream check for artificial playback)
 	int maxclients = g_RehldsSvs->GetMaxClients();
 	int sentCount = 0;

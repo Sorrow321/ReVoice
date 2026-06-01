@@ -50,6 +50,9 @@ cvar_t g_cv_rev_playback_lp_hz = { "REV_PlaybackLowpassHz", "3800", 0, 0.0f, nul
 // packet is self-contained (first frame independent). Test for per-packet boundary clicks
 // when the client decoder resets per packet. 0 = continuous stream (default).
 cvar_t g_cv_rev_playback_packet_reset = { "REV_PlaybackPacketReset", "0", 0, 0.0f, nullptr };
+// 1 = hex-dump voice packet headers to the console for both a real talking player ("REAL")
+// and bot playback ("PLAY"), so their framing/cadence can be compared. Enable briefly only.
+cvar_t g_cv_rev_voice_dump = { "REV_VoiceDump", "0", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playvoice_client = { "REV_PlayvoiceClient", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_bot_name = { "REV_PlaybackBotName", "vk.com/laguna_games", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_active = { "REV_PlaybackActive", "0", 0, 0.0f, nullptr }; // status flag for AMXX (set by plugin)
@@ -73,6 +76,7 @@ cvar_t *g_pcv_rev_opus_complexity = nullptr;
 cvar_t *g_pcv_rev_playback_resample = nullptr;
 cvar_t *g_pcv_rev_playback_lp_hz = nullptr;
 cvar_t *g_pcv_rev_playback_packet_reset = nullptr;
+cvar_t *g_pcv_rev_voice_dump = nullptr;
 cvar_t *g_pcv_rev_playvoice_client = nullptr;
 cvar_t *g_pcv_rev_playback_bot_name = nullptr;
 cvar_t *g_pcv_rev_playback_active = nullptr;
@@ -101,6 +105,7 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_resample);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_lp_hz);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_packet_reset);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_voice_dump);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playvoice_client);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_bot_name);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_active);
@@ -124,6 +129,7 @@ void Revoice_Init_Cvars()
 	g_pcv_rev_playback_resample = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_resample.name);
 	g_pcv_rev_playback_lp_hz = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_lp_hz.name);
 	g_pcv_rev_playback_packet_reset = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_packet_reset.name);
+	g_pcv_rev_voice_dump = g_engfuncs.pfnCVarGetPointer(g_cv_rev_voice_dump.name);
 	g_pcv_rev_playvoice_client = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playvoice_client.name);
 	g_pcv_rev_playback_bot_name = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_bot_name.name);
 	g_pcv_rev_playback_active = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_active.name);
