@@ -37,12 +37,17 @@ static inline void REV_PlaybackDebugPrintf(const char* fmt, ...)
 
 // If a client's datagram is temporarily full, dropping voice frames causes audible fades/silence.
 // This queue lets us retry sending on subsequent ticks (small jitter buffer on server side).
-static const int REV_VOICE_QUEUE_MAX_PAYLOAD = 4096;
-static const int REV_VOICE_QUEUE_CAP_FRAMES = 64; // ~1.28s at 20ms frames
+static const int REV_VOICE_QUEUE_MAX_PAYLOAD = 16384; // large enough for big (up to 1000 ms) frames
+static const int REV_VOICE_QUEUE_CAP_FRAMES = 16;     // 16 frames; depth scales with frame_ms
 
-// Largest frame we ever emit: 100 ms at 8 kHz. frame_ms is clamped to <=100 in Update(),
-// so FRAME_SAMPLES_8K can never exceed this. Used to size the silence scratch buffers.
-static const int REV_MAX_FRAME_SAMPLES_8K = 800;
+// Largest frame we ever emit: 1000 ms at 8 kHz. frame_ms is clamped to <=1000 in Update(),
+// so FRAME_SAMPLES_8K can never exceed this. Used to size the silence scratch buffer.
+static const int REV_MAX_FRAME_SAMPLES_8K = 8000;
+
+// Single shared silence frame (all zeros). Update() is single-threaded and never writes
+// to this, so a file-scope zeroed buffer is reused everywhere instead of large per-call
+// stack arrays (8000 shorts = 16 KB each).
+static short g_RevSilenceFrame[REV_MAX_FRAME_SAMPLES_8K] = { 0 };
 
 struct REV_QueuedVoiceFrame {
 	int player0; // 0-based source player id written into svc_voicedata
@@ -223,8 +228,10 @@ static void AntiAliasLowpassMono(float* samples, int count, float cutoffHz, floa
 // Linear-interpolation resample of a mono float buffer to targetRate, writing
 // clamped PCM16. Only safe (artifact-free) once HF content above the output
 // Nyquist has been removed by AntiAliasLowpassMono.
+// When linear==false the resampler is OFF: a nearest-sample passthrough with no
+// interpolation (for inputRate==targetRate this is a bit-exact copy of the source).
 static int ResampleMonoLinear(const float* in, int inFrames, int inputRate,
-	short* out, int maxOutputSamples, int targetRate)
+	short* out, int maxOutputSamples, int targetRate, bool linear)
 {
 	if (!in || !out || inFrames <= 0 || inputRate <= 0 || targetRate <= 0)
 		return 0;
@@ -236,15 +243,21 @@ static int ResampleMonoLinear(const float* in, int inFrames, int inputRate,
 	for (int i = 0; i < outputSamples; i++) {
 		float srcPos = (float)i * (float)inputRate / (float)targetRate;
 		int s0 = (int)srcPos;
-		int s1 = s0 + 1;
-		float frac = srcPos - (float)s0;
 
 		if (s0 >= inFrames)
 			break;
-		if (s1 >= inFrames)
-			s1 = inFrames - 1;
 
-		float v = in[s0] + (in[s1] - in[s0]) * frac;
+		float v;
+		if (linear) {
+			int s1 = s0 + 1;
+			float frac = srcPos - (float)s0;
+			if (s1 >= inFrames)
+				s1 = inFrames - 1;
+			v = in[s0] + (in[s1] - in[s0]) * frac;
+		} else {
+			v = in[s0]; // nearest-sample, no interpolation
+		}
+
 		if (v > 32767.0f) v = 32767.0f;
 		if (v < -32768.0f) v = -32768.0f;
 		out[i] = (short)v;
@@ -293,9 +306,10 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 	const char* speexBuf = nullptr;
 	int speexLen = 0;
 
+	// Sized for up to a 1000 ms frame (50 Opus/Silk/Speex sub-frames) plus framing/headers.
 	static char opusOut[32768];
 	static char silkOut[32768];
-	static char speexOut[4096];
+	static char speexOut[16384];
 
 	if (pcm8k && numSamples8k > 0) {
 		if (g_VoicePlayback.GetOpusCodec()) {
@@ -798,8 +812,12 @@ void CVoicePlayback::Update()
 		chunkDurationMs = (int)g_pcv_rev_playback_frame_ms->value;
 	}
 	// Clamp to sane values (voice-friendly). Smaller -> more packets, bigger -> less bandwidth.
+	// Upper bound raised to 1000 ms so packet-boundary artifacts can be pushed as rare as
+	// possible (fewer packets/s). NOTE: very large frames make each voice packet large; at
+	// high REV_OpusBitrate the payload may exceed the engine datagram and fail to send, so
+	// pair big frames with a low bitrate.
 	if (chunkDurationMs < 20) chunkDurationMs = 20;
-	if (chunkDurationMs > 100) chunkDurationMs = 100;
+	if (chunkDurationMs > 1000) chunkDurationMs = 1000;
 	// Snap to multiples of 20ms to keep Opus/Silk frame boundaries stable.
 	chunkDurationMs = (chunkDurationMs / 20) * 20;
 	if (chunkDurationMs <= 0) chunkDurationMs = 40;
@@ -826,8 +844,12 @@ void CVoicePlayback::Update()
 	static int s_dbgUnderflowTicks = 0;
 	static int s_dbgResets = 0;
 
-	// Prefetch: keep a few frames buffered so we don't underflow if the send schedule catches up.
-	const int targetBuffered = FRAME_SAMPLES_8K * 6; // ~240ms at 40ms frames
+	// Prefetch: keep a little audio buffered so we don't underflow if the send schedule catches up.
+	// Aim for ~2 frames, but at least ~240 ms (so small frames still get a useful cushion) and never
+	// more than the carry buffer can hold alongside one more frame.
+	int targetBuffered = FRAME_SAMPLES_8K * 2;
+	if (targetBuffered < 1920) targetBuffered = 1920;            // >=240ms at 8kHz
+	if (targetBuffered > carryCap - FRAME_SAMPLES_8K) targetBuffered = carryCap - FRAME_SAMPLES_8K;
 	int prefetchIters = 0;
 	while (m_State.pcm8kCarrySamples < targetBuffered && m_State.pcm8kCarrySamples + FRAME_SAMPLES_8K <= carryCap) {
 		if (m_State.dataPos >= m_State.dataSize)
@@ -889,31 +911,39 @@ void CVoicePlayback::Update()
 			}
 		}
 
-		// Anti-alias BEFORE decimation (the symptom-1 fix). Run a steep low-pass
-		// at the source rate, then resample. Cutoff is referenced to the 8 kHz
-		// output Nyquist; with the tape-style speed feature the output pitch scales
-		// by 'speed', so the source-rate cutoff is divided by speed to keep the
-		// post-resample content below 4 kHz. REV_BiquadSetLowpass clamps the result
-		// to the source Nyquist, so slow (speed < 1) playback just filters less.
-		if (inFrames > 0) {
-			float cutoff8k = 3700.0f;
-			if (g_pcv_rev_playback_lp_hz && g_pcv_rev_playback_lp_hz->value > 0.0f) {
-				cutoff8k = g_pcv_rev_playback_lp_hz->value;
+		// Anti-alias BEFORE decimation (the symptom-1 fix). Run a steep low-pass at the
+		// source rate, then resample. Cutoff is referenced to the 8 kHz output Nyquist;
+		// with the tape-style speed feature the output pitch scales by 'speed', so the
+		// source-rate cutoff is divided by speed to keep the post-resample content below
+		// 4 kHz. REV_PlaybackLowpassHz <= 0 turns the filter completely OFF.
+		bool lowpassOn = true;
+		float cutoff8k = 3700.0f;
+		if (g_pcv_rev_playback_lp_hz) {
+			float v = g_pcv_rev_playback_lp_hz->value;
+			if (v <= 0.0f) {
+				lowpassOn = false;
+			} else {
+				cutoff8k = v;
 				if (cutoff8k > 3900.0f) cutoff8k = 3900.0f; // headroom below 4 kHz Nyquist
 				if (cutoff8k < 1000.0f) cutoff8k = 1000.0f; // keep it reasonable
 			}
+		}
+		if (inFrames > 0 && lowpassOn) {
 			float srcCutoff = cutoff8k / playbackSpeed;
 			AntiAliasLowpassMono(monoSrc, inFrames, srcCutoff, (float)m_State.sampleRate, m_State.aaZ);
 		}
 
-		static short pcm8k[2048];
+		// Output frame holds up to one full 1000 ms frame (8000 samples) plus headroom.
+		static short pcm8k[REV_MAX_FRAME_SAMPLES_8K + 256];
 		// Resampling at (sampleRate * speed) maps the S-times-larger source chunk back into
 		// one ~FRAME_SAMPLES_8K output frame, so output size stays bounded regardless of speed.
 		int resampleInputRate = (int)(m_State.sampleRate * playbackSpeed);
 		if (resampleInputRate < 1) resampleInputRate = 1;
+		// REV_PlaybackResample 0 = OFF (nearest-sample passthrough, no interpolation).
+		bool resampleLinear = !(g_pcv_rev_playback_resample && g_pcv_rev_playback_resample->value == 0.0f);
 		int numSamples8k = ResampleMonoLinear(
 			monoSrc, inFrames, resampleInputRate,
-			pcm8k, (int)(sizeof(pcm8k) / sizeof(pcm8k[0])), 8000
+			pcm8k, (int)(sizeof(pcm8k) / sizeof(pcm8k[0])), 8000, resampleLinear
 		);
 		if (numSamples8k > 0) {
 			// Apply volume scaling. Effective volume = the StartPlayback arg (m_State.volume,
@@ -959,8 +989,7 @@ void CVoicePlayback::Update()
 			// voicedata entirely. The client fades out quickly when packets stop; sending silence frames
 			// (non-final) keeps the "mic" alive until we refill the PCM buffer.
 			if (m_State.dataPos < m_State.dataSize) {
-				short silence[REV_MAX_FRAME_SAMPLES_8K] = {0};
-				BroadcastVoiceData(silence, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, false, m_State.targetMask);
+				BroadcastVoiceData(g_RevSilenceFrame, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, false, m_State.targetMask);
 				s_dbgKeepaliveSent++;
 				s_dbgUnderflowTicks++;
 				m_State.nextChunkTime += frameSec;
@@ -997,8 +1026,7 @@ void CVoicePlayback::Update()
 				if (gapFrames < 1) gapFrames = 1;
 			}
 
-			short silence[REV_MAX_FRAME_SAMPLES_8K] = {0}; // supports up to 100ms at 8kHz
-			BroadcastVoiceData(silence, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, true, m_State.targetMask);
+			BroadcastVoiceData(g_RevSilenceFrame, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, true, m_State.targetMask);
 			m_State.framesSinceReset = 0;
 			m_State.resetGapFramesRemaining = gapFrames;
 			s_dbgResets++;
@@ -1029,8 +1057,7 @@ void CVoicePlayback::Update()
 				m_State.pcm8kCarry[i] = 0;
 			BroadcastVoiceData(m_State.pcm8kCarry, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, true, m_State.targetMask);
 		} else {
-			short silence[REV_MAX_FRAME_SAMPLES_8K] = {0};
-			BroadcastVoiceData(silence, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, true, m_State.targetMask);
+			BroadcastVoiceData(g_RevSilenceFrame, FRAME_SAMPLES_8K, m_State.targetPlayerIndex, true, m_State.targetMask);
 		}
 		StopPlayback();
 		SERVER_PRINT("[ReVoice Playback] Playback finished\n");

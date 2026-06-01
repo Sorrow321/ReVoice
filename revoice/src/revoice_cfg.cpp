@@ -41,6 +41,10 @@ cvar_t g_cv_rev_playback_reset_frames = { "REV_PlaybackResetFrames", "0", 0, 0.0
 cvar_t g_cv_rev_playback_reset_gap_ms = { "REV_PlaybackResetGapMs", "0", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_opus_bitrate = { "REV_OpusBitrate", "64000", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_opus_complexity = { "REV_OpusComplexity", "10", 0, 0.0f, nullptr };
+// Bot-playback resampler: 1 = linear-interpolation resample to 8 kHz (default),
+// 0 = OFF (nearest-sample passthrough, no interpolation; identity for an 8 kHz source).
+cvar_t g_cv_rev_playback_resample = { "REV_PlaybackResample", "1", 0, 0.0f, nullptr };
+// Bot-playback anti-alias low-pass cutoff (Hz). 0 (or negative) = filter OFF.
 cvar_t g_cv_rev_playback_lp_hz = { "REV_PlaybackLowpassHz", "3800", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playvoice_client = { "REV_PlayvoiceClient", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_bot_name = { "REV_PlaybackBotName", "vk.com/laguna_games", 0, 0.0f, nullptr };
@@ -62,6 +66,7 @@ cvar_t *g_pcv_rev_playback_reset_frames = nullptr;
 cvar_t *g_pcv_rev_playback_reset_gap_ms = nullptr;
 cvar_t *g_pcv_rev_opus_bitrate = nullptr;
 cvar_t *g_pcv_rev_opus_complexity = nullptr;
+cvar_t *g_pcv_rev_playback_resample = nullptr;
 cvar_t *g_pcv_rev_playback_lp_hz = nullptr;
 cvar_t *g_pcv_rev_playvoice_client = nullptr;
 cvar_t *g_pcv_rev_playback_bot_name = nullptr;
@@ -88,6 +93,7 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_reset_gap_ms);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_opus_bitrate);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_opus_complexity);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_resample);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_lp_hz);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playvoice_client);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_bot_name);
@@ -109,6 +115,7 @@ void Revoice_Init_Cvars()
 	g_pcv_rev_playback_reset_gap_ms = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_reset_gap_ms.name);
 	g_pcv_rev_opus_bitrate = g_engfuncs.pfnCVarGetPointer(g_cv_rev_opus_bitrate.name);
 	g_pcv_rev_opus_complexity = g_engfuncs.pfnCVarGetPointer(g_cv_rev_opus_complexity.name);
+	g_pcv_rev_playback_resample = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_resample.name);
 	g_pcv_rev_playback_lp_hz = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_lp_hz.name);
 	g_pcv_rev_playvoice_client = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playvoice_client.name);
 	g_pcv_rev_playback_bot_name = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_bot_name.name);

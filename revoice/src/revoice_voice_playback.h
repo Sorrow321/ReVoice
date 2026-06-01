@@ -22,8 +22,9 @@ private:
 		bool paused;   // true: playback suspended, file/position kept for Resume()
 		float volume;
 		bool targetMask[MAX_PLAYERS];
-		// Carry buffer at 8kHz mono PCM16 to feed encoders exact frame sizes (Opus/Silk/Speex stability)
-		short pcm8kCarry[8192];
+		// Carry buffer at 8kHz mono PCM16 to feed encoders exact frame sizes (Opus/Silk/Speex stability).
+		// Sized to hold several frames at the max 1000 ms frame size (8000 samples/frame).
+		short pcm8kCarry[65536];
 		int pcm8kCarrySamples;
 		int framesSinceReset;
 		int resetGapFramesRemaining;
