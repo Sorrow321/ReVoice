@@ -479,6 +479,15 @@ void CVoicePlayback::InitCodecs()
 		m_OpusCodec = nullptr;
 	}
 
+	// Declared sampling rate for the SteamP2P PLT_SamplingRate header. Real CS Opus clients
+	// declare 24000; default 8000 matches our encoders' actual rate. Set live from the cvar
+	// (re-read on each StartPlayback) so it can be A/B tested without affecting transcode codecs.
+	int declaredRate = 8000;
+	if (g_pcv_rev_playback_voice_rate && g_pcv_rev_playback_voice_rate->value > 0.0f)
+		declaredRate = (int)g_pcv_rev_playback_voice_rate->value;
+	if (m_OpusCodec) m_OpusCodec->SetSampleRate(declaredRate);
+	if (m_SilkCodec) m_SilkCodec->SetSampleRate(declaredRate);
+
 	// Mark ready even on partial failure so we don't re-attempt (and re-allocate)
 	// every frame; the per-codec null checks handle any missing codec.
 	m_CodecsReady = true;

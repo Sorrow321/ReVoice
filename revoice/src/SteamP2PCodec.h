@@ -29,6 +29,11 @@ public:
 	void SetClient(IGameClient *client);
 	IVoiceCodec *GetCodec() const { return m_BackendCodec; }
 
+	// Sampling rate written into the PLT_SamplingRate header of each emitted packet.
+	// Real CS Opus clients declare 24000; ReVoice's 8 kHz default differs. Settable so the
+	// playback path can match real clients without affecting the transcode codecs.
+	void SetSampleRate(int rate) { m_SampleRate = rate; }
+
 private:
 	int StreamDecode(const char *pCompressed, int compressedBytes, char *pUncompressed, int maxUncompressedBytes) const;
 	int StreamEncode(const char *pUncompressedBytes, int nSamples, char *pCompressed, int maxCompressedBytes, bool bFinal) const;
@@ -36,4 +41,5 @@ private:
 private:
 	IGameClient *m_Client;
 	IVoiceCodec *m_BackendCodec;
+	int m_SampleRate;
 };
