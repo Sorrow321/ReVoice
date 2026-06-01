@@ -22,9 +22,9 @@ private:
 		bool paused;   // true: playback suspended, file/position kept for Resume()
 		float volume;
 		bool targetMask[MAX_PLAYERS];
-		// Carry buffer at 8kHz mono PCM16 to feed encoders exact frame sizes (Opus/Silk/Speex stability).
-		// Sized to hold several frames at the max 1000 ms frame size (8000 samples/frame).
-		short pcm8kCarry[65536];
+		// Carry buffer of mono PCM16 (at the active output rate) to feed encoders exact frame
+		// sizes. Sized to hold a few frames at the worst case (1000 ms @ 24 kHz = 24000/frame).
+		short pcm8kCarry[98304];
 		int pcm8kCarrySamples;
 		int framesSinceReset;
 		int resetGapFramesRemaining;
@@ -40,6 +40,11 @@ private:
 	CSteamP2PCodec* m_SilkCodec;
 	VoiceCodec_Frame* m_SpeexCodec;
 	bool m_CodecsReady;
+	int m_codecRate;   // output rate the playback codecs were built at (8000 or 24000)
+
+public:
+	int GetCodecRate() const { return m_codecRate; }
+private:
 
 	bool ReadWavHeader(FILE* file, int& sampleRate, int& channels, int& bitsPerSample, unsigned int& dataSize);
 

@@ -17,6 +17,8 @@ private:
 
 	int m_samplerate;
 	int m_bitrate;
+	int m_frameSize;     // samples per 20ms Opus frame at m_samplerate (160 @8k, 480 @24k)
+	int m_maxFrameSize;  // 3 * m_frameSize (decode buffer bound / DTX fill)
 
 	uint16 m_nEncodeSeq;
 	uint16 m_nDecodeSeq;
@@ -24,7 +26,9 @@ private:
 	bool m_PacketLossConcealment;
 
 public:
-	VoiceEncoder_Opus();
+	// sampleRate selects the Opus rate/bandwidth: 8000 -> SILK narrowband (default, used by
+	// the transcode codecs); 24000 -> superwideband (matches real CS Opus clients).
+	VoiceEncoder_Opus(int sampleRate = 8000);
 
 	virtual ~VoiceEncoder_Opus();
 
