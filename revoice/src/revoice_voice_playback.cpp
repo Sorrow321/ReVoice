@@ -538,7 +538,14 @@ bool CVoicePlayback::StartPlayback(const char* filename, int playerIndex, float 
 	
 	// Stop any current playback
 	StopPlayback();
-	
+
+	// Rebuild the playback codecs so encoder cvars (REV_OpusBitrate,
+	// REV_OpusComplexity, ...) are re-read for every new playback. The codecs
+	// otherwise initialize once at load and never pick up live cvar changes,
+	// so "restart music" is the point at which a new bitrate takes effect.
+	DeInitCodecs();
+	InitCodecs();
+
 	// Build full path:
 	// - If filename starts with '/', treat as absolute.
 	// - Else if it contains '/', prepend "cstrike/" so "sound/custom/foo.wav" works.
@@ -1046,6 +1053,7 @@ void CVoicePlayback::Update()
 				s_dbgFramesSent, s_dbgKeepaliveSent, s_dbgUnderflowTicks,
 				g_dbgQ_enqueued, g_dbgQ_flushed, g_dbgQ_blocked, g_dbgQ_dropped, g_dbgQ_maxDepth,
 				m_State.pcm8kCarrySamples, m_State.nextChunkTime, currentTime);
+			SERVER_PRINT(buf);
 			s_dbgFramesSent = 0;
 			s_dbgKeepaliveSent = 0;
 			s_dbgUnderflowTicks = 0;

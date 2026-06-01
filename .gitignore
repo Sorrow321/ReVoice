@@ -699,3 +699,5 @@ latest_receiver.py
 # should not be exposed: AMXX scripts and Python tooling.
 *.sma
 *.py
+
+audio_experiment
