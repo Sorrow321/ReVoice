@@ -56,6 +56,10 @@ cvar_t g_cv_rev_voice_dump = { "REV_VoiceDump", "0", 0, 0.0f, nullptr };
 // Sampling rate declared in the playback packets' PLT_SamplingRate header. Real CS Opus
 // clients declare 24000; default 8000 = the encoder's actual rate. Applied on music restart.
 cvar_t g_cv_rev_playback_voice_rate = { "REV_PlaybackVoiceRate", "8000", 0, 0.0f, nullptr };
+// 1 = append raw voice packets to cstrike/vdump_real.bin (real talking player) and
+// cstrike/vdump_play.bin (bot playback), as [uint32 len][float64 time][len bytes].
+// For offline decode/analysis. Enable briefly only. Delete the files before a fresh capture.
+cvar_t g_cv_rev_voice_save = { "REV_VoiceSave", "0", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playvoice_client = { "REV_PlayvoiceClient", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_bot_name = { "REV_PlaybackBotName", "vk.com/laguna_games", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_playback_active = { "REV_PlaybackActive", "0", 0, 0.0f, nullptr }; // status flag for AMXX (set by plugin)
@@ -81,6 +85,7 @@ cvar_t *g_pcv_rev_playback_lp_hz = nullptr;
 cvar_t *g_pcv_rev_playback_packet_reset = nullptr;
 cvar_t *g_pcv_rev_voice_dump = nullptr;
 cvar_t *g_pcv_rev_playback_voice_rate = nullptr;
+cvar_t *g_pcv_rev_voice_save = nullptr;
 cvar_t *g_pcv_rev_playvoice_client = nullptr;
 cvar_t *g_pcv_rev_playback_bot_name = nullptr;
 cvar_t *g_pcv_rev_playback_active = nullptr;
@@ -111,6 +116,7 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_packet_reset);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_voice_dump);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_voice_rate);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_voice_save);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playvoice_client);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_bot_name);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_active);
@@ -136,6 +142,7 @@ void Revoice_Init_Cvars()
 	g_pcv_rev_playback_packet_reset = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_packet_reset.name);
 	g_pcv_rev_voice_dump = g_engfuncs.pfnCVarGetPointer(g_cv_rev_voice_dump.name);
 	g_pcv_rev_playback_voice_rate = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_voice_rate.name);
+	g_pcv_rev_voice_save = g_engfuncs.pfnCVarGetPointer(g_cv_rev_voice_save.name);
 	g_pcv_rev_playvoice_client = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playvoice_client.name);
 	g_pcv_rev_playback_bot_name = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_bot_name.name);
 	g_pcv_rev_playback_active = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_active.name);

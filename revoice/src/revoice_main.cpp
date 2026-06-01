@@ -108,6 +108,16 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 		SERVER_PRINT(msg);
 	}
 
+	// Save raw real-player voice packets for offline decode/analysis (REV_VoiceSave 1).
+	if (g_pcv_rev_voice_save && g_pcv_rev_voice_save->value != 0.0f) {
+		FILE* f = fopen("cstrike/vdump_real.bin", "ab");
+		if (f) {
+			uint32 l = (uint32)nDataLength; double t = g_RehldsSv->GetTime();
+			fwrite(&l, 4, 1, f); fwrite(&t, 8, 1, f); fwrite(chReceived, 1, nDataLength, f);
+			fclose(f);
+		}
+	}
+
 	char transcodedBuf[4096];
 
 	char *silkData = nullptr;

@@ -347,6 +347,16 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 		SERVER_PRINT(msg);
 	}
 
+	// Save raw playback Opus packets for offline decode/analysis (REV_VoiceSave 1).
+	if (g_pcv_rev_voice_save && g_pcv_rev_voice_save->value != 0.0f && opusBuf && opusLen > 0) {
+		FILE* f = fopen("cstrike/vdump_play.bin", "ab");
+		if (f) {
+			uint32 l = (uint32)opusLen; double t = g_RehldsSv->GetTime();
+			fwrite(&l, 4, 1, f); fwrite(&t, 8, 1, f); fwrite(opusBuf, 1, opusLen, f);
+			fclose(f);
+		}
+	}
+
 	// Broadcast to all clients (bypass voice stream check for artificial playback)
 	int maxclients = g_RehldsSvs->GetMaxClients();
 	int sentCount = 0;
