@@ -149,70 +149,108 @@ static void REV_FlushQueuedVoiceFrames(int clientIdx, IGameClient* dstClient)
 	}
 }
 
-// Simple resampling and channel conversion
-static int ConvertToMonoResample(const short* input, int inputSamples, int inputRate, int inputChannels,
-	short* output, int maxOutputSamples, int targetRate)
+// --- Resampling / anti-aliasing --------------------------------------------
+//
+// The output voice stream is 8 kHz (Nyquist 4 kHz). Source files are usually
+// 44.1/48 kHz, so we must decimate. The critical requirement is to remove
+// content above the output Nyquist *before* decimating; otherwise it folds
+// back into the audible band as aliasing (the "crackle on highs / rock music"
+// artifact). We do that with a steep low-pass at the source rate, then a cheap
+// linear-interpolation resample (safe to use once the HF content is gone).
+//
+// The previous implementation did the opposite: it resampled with 2-tap linear
+// interpolation (no anti-aliasing for a ~5.5:1 decimation) and only low-passed
+// afterwards at 8 kHz with a one-pole filter — far too late and far too gentle.
+
+// One biquad section (RBJ cookbook low-pass), Direct Form II transposed.
+struct REV_Biquad {
+	float b0, b1, b2, a1, a2; // coefficients, normalized so a0 == 1
+	float z1, z2;             // filter state
+};
+
+static void REV_BiquadSetLowpass(REV_Biquad* f, float fc, float fs, float Q)
 {
-	if (!input || !output || inputSamples <= 0 || inputChannels <= 0 || inputRate <= 0 || targetRate <= 0)
-		return 0;
-
-	const int inFrames = inputSamples / inputChannels;
-	int outputSamples = (inFrames * targetRate) / inputRate;
-	if (outputSamples > maxOutputSamples)
-		outputSamples = maxOutputSamples;
-
-	// Linear interpolation resampling + stereo->mono averaging.
-	// This avoids the harsh artifacts / pitch weirdness from nearest-neighbor.
-	for (int i = 0; i < outputSamples; i++) {
-		float srcPos = (float)i * (float)inputRate / (float)targetRate;
-		int srcFrame0 = (int)srcPos;
-		int srcFrame1 = srcFrame0 + 1;
-		float frac = srcPos - (float)srcFrame0;
-
-		if (srcFrame0 >= inFrames)
-			break;
-		if (srcFrame1 >= inFrames)
-			srcFrame1 = inFrames - 1;
-
-		int sum0 = 0;
-		int sum1 = 0;
-		for (int ch = 0; ch < inputChannels; ch++) {
-			int idx0 = srcFrame0 * inputChannels + ch;
-			int idx1 = srcFrame1 * inputChannels + ch;
-			if (idx0 < inputSamples) sum0 += input[idx0];
-			if (idx1 < inputSamples) sum1 += input[idx1];
-		}
-
-		float mono0 = (float)sum0 / (float)inputChannels;
-		float mono1 = (float)sum1 / (float)inputChannels;
-		float out = mono0 + (mono1 - mono0) * frac;
-
-		// clamp
-		if (out > 32767.0f) out = 32767.0f;
-		if (out < -32768.0f) out = -32768.0f;
-		output[i] = (short)out;
-	}
-
-	return outputSamples;
+	if (fs <= 0.0f) return;
+	if (fc < 10.0f) fc = 10.0f;
+	if (fc > 0.45f * fs) fc = 0.45f * fs; // keep below Nyquist with headroom
+	float w0 = 2.0f * 3.14159265358979f * fc / fs;
+	float cosw0 = cosf(w0);
+	float sinw0 = sinf(w0);
+	float alpha = sinw0 / (2.0f * Q);
+	float a0 = 1.0f + alpha;
+	f->b0 = ((1.0f - cosw0) * 0.5f) / a0;
+	f->b1 = (1.0f - cosw0) / a0;
+	f->b2 = ((1.0f - cosw0) * 0.5f) / a0;
+	f->a1 = (-2.0f * cosw0) / a0;
+	f->a2 = (1.0f - alpha) / a0;
 }
 
-// Very small one-pole low-pass to tame >4 kHz content when running at 8 kHz.
-// cutoffHz defaults effectively to ~3.8 kHz; state is kept across frames.
-static void ApplyLowpass8k(short* samples, int count, float cutoffHz, float sampleRate, float& z)
+static inline float REV_BiquadProcess(REV_Biquad* f, float x)
+{
+	float y = f->b0 * x + f->z1;
+	f->z1 = f->b1 * x - f->a1 * y + f->z2;
+	f->z2 = f->b2 * x - f->a2 * y;
+	return y;
+}
+
+// 4th-order Butterworth low-pass (two cascaded biquads) applied in place to a
+// mono buffer at the source sample rate. zState[4] holds the two sections'
+// filter state and MUST persist across frames so chunk boundaries stay
+// click-free. Coefficients are recomputed each call (cheap) so a live cutoff /
+// playback-speed change takes effect mid-song without resetting the state.
+static void AntiAliasLowpassMono(float* samples, int count, float cutoffHz, float sampleRate, float* zState)
 {
 	if (!samples || count <= 0 || sampleRate <= 0.0f || cutoffHz <= 0.0f)
 		return;
-	float dt = 1.0f / sampleRate;
-	float rc = 1.0f / (2.0f * 3.14159265f * cutoffHz);
-	float alpha = dt / (rc + dt);
+
+	// Butterworth 4th-order: maximally-flat per-section Q values.
+	REV_Biquad s1, s2;
+	REV_BiquadSetLowpass(&s1, cutoffHz, sampleRate, 0.54119610f);
+	REV_BiquadSetLowpass(&s2, cutoffHz, sampleRate, 1.30656296f);
+	s1.z1 = zState[0]; s1.z2 = zState[1];
+	s2.z1 = zState[2]; s2.z2 = zState[3];
+
 	for (int i = 0; i < count; i++) {
-		float x = (float)samples[i];
-		z = z + alpha * (x - z);
-		float y = z;
-		if (y > 32767.0f) y = 32767.0f;
-		if (y < -32768.0f) y = -32768.0f;
-		samples[i] = (short)y;
+		float y = REV_BiquadProcess(&s1, samples[i]);
+		y = REV_BiquadProcess(&s2, y);
+		samples[i] = y;
 	}
+
+	zState[0] = s1.z1; zState[1] = s1.z2;
+	zState[2] = s2.z1; zState[3] = s2.z2;
+}
+
+// Linear-interpolation resample of a mono float buffer to targetRate, writing
+// clamped PCM16. Only safe (artifact-free) once HF content above the output
+// Nyquist has been removed by AntiAliasLowpassMono.
+static int ResampleMonoLinear(const float* in, int inFrames, int inputRate,
+	short* out, int maxOutputSamples, int targetRate)
+{
+	if (!in || !out || inFrames <= 0 || inputRate <= 0 || targetRate <= 0)
+		return 0;
+
+	int outputSamples = (int)(((long long)inFrames * targetRate) / inputRate);
+	if (outputSamples > maxOutputSamples)
+		outputSamples = maxOutputSamples;
+
+	for (int i = 0; i < outputSamples; i++) {
+		float srcPos = (float)i * (float)inputRate / (float)targetRate;
+		int s0 = (int)srcPos;
+		int s1 = s0 + 1;
+		float frac = srcPos - (float)s0;
+
+		if (s0 >= inFrames)
+			break;
+		if (s1 >= inFrames)
+			s1 = inFrames - 1;
+
+		float v = in[s0] + (in[s1] - in[s0]) * frac;
+		if (v > 32767.0f) v = 32767.0f;
+		if (v < -32768.0f) v = -32768.0f;
+		out[i] = (short)v;
+	}
+
+	return outputSamples;
 }
 
 // Broadcast voice data to all clients.
@@ -364,7 +402,7 @@ CVoicePlayback::CVoicePlayback()
 	m_State.resetGapFramesRemaining = 0;
 	m_State.volume = 1.0f;
 	for (int i = 0; i < MAX_PLAYERS; i++) m_State.targetMask[i] = true;
-	m_State.lowpassState = 0.0f;
+	m_State.aaZ[0] = m_State.aaZ[1] = m_State.aaZ[2] = m_State.aaZ[3] = 0.0f;
 	m_OpusCodec = nullptr;
 	m_SilkCodec = nullptr;
 	m_SpeexCodec = nullptr;
@@ -615,7 +653,7 @@ bool CVoicePlayback::StartPlayback(const char* filename, int playerIndex, float 
 	m_State.pcm8kCarrySamples = 0;
 	m_State.framesSinceReset = 0;
 	m_State.resetGapFramesRemaining = 0;
-	m_State.lowpassState = 0.0f;
+	m_State.aaZ[0] = m_State.aaZ[1] = m_State.aaZ[2] = m_State.aaZ[3] = 0.0f;
 	REV_ResetPlaybackVoiceQueues();
 	
 	m_State.paused = false;
@@ -643,7 +681,7 @@ void CVoicePlayback::StopPlayback()
 	m_State.resetGapFramesRemaining = 0;
 	m_State.volume = 1.0f;
 	for (int i = 0; i < MAX_PLAYERS; i++) m_State.targetMask[i] = true;
-	m_State.lowpassState = 0.0f;
+	m_State.aaZ[0] = m_State.aaZ[1] = m_State.aaZ[2] = m_State.aaZ[3] = 0.0f;
 	REV_ResetPlaybackVoiceQueues();
 }
 
@@ -686,7 +724,7 @@ bool CVoicePlayback::SeekRelative(double seconds)
 	// Drop everything buffered so no stale (pre-seek) audio plays after the jump.
 	m_State.dataPos = (unsigned int)newPos;
 	m_State.pcm8kCarrySamples = 0;
-	m_State.lowpassState = 0.0f;
+	m_State.aaZ[0] = m_State.aaZ[1] = m_State.aaZ[2] = m_State.aaZ[3] = 0.0f;
 	m_State.resetGapFramesRemaining = 0;
 	REV_ResetPlaybackVoiceQueues();
 	// Resync the send schedule to "now" so we don't burst catch-up frames after the jump.
@@ -819,18 +857,46 @@ void CVoicePlayback::Update()
 		if (bytesRead == 0)
 			break;
 
-		// Convert to 16-bit PCM if needed
-		static short pcm16Buffer[49152];
-		int numSourceSamples = 0;
+		// Convert to 16-bit PCM and downmix to mono at the SOURCE sample rate.
+		// (float buffer so the anti-alias filter below has headroom/precision)
+		static float monoSrc[49152];
+		int inFrames = 0;
 		if (m_State.bitsPerSample == 8) {
-			numSourceSamples = (int)bytesRead;
-			for (int i = 0; i < (int)bytesRead; i++) {
-				unsigned char sample8 = (unsigned char)audioBuffer[i];
-				pcm16Buffer[i] = (short)((sample8 - 128) * 256);
+			inFrames = (int)bytesRead / m_State.channels; // 1 byte per sample
+			for (int fr = 0; fr < inFrames; fr++) {
+				int sum = 0;
+				for (int ch = 0; ch < m_State.channels; ch++) {
+					unsigned char s8 = (unsigned char)audioBuffer[fr * m_State.channels + ch];
+					sum += ((int)s8 - 128) * 256;
+				}
+				monoSrc[fr] = (float)sum / (float)m_State.channels;
 			}
 		} else {
-			numSourceSamples = (int)(bytesRead / 2);
-			memcpy(pcm16Buffer, audioBuffer, bytesRead);
+			const short* s16 = (const short*)audioBuffer;
+			inFrames = (int)(bytesRead / 2) / m_State.channels; // 2 bytes per sample
+			for (int fr = 0; fr < inFrames; fr++) {
+				int sum = 0;
+				for (int ch = 0; ch < m_State.channels; ch++)
+					sum += s16[fr * m_State.channels + ch];
+				monoSrc[fr] = (float)sum / (float)m_State.channels;
+			}
+		}
+
+		// Anti-alias BEFORE decimation (the symptom-1 fix). Run a steep low-pass
+		// at the source rate, then resample. Cutoff is referenced to the 8 kHz
+		// output Nyquist; with the tape-style speed feature the output pitch scales
+		// by 'speed', so the source-rate cutoff is divided by speed to keep the
+		// post-resample content below 4 kHz. REV_BiquadSetLowpass clamps the result
+		// to the source Nyquist, so slow (speed < 1) playback just filters less.
+		if (inFrames > 0) {
+			float cutoff8k = 3700.0f;
+			if (g_pcv_rev_playback_lp_hz && g_pcv_rev_playback_lp_hz->value > 0.0f) {
+				cutoff8k = g_pcv_rev_playback_lp_hz->value;
+				if (cutoff8k > 3900.0f) cutoff8k = 3900.0f; // headroom below 4 kHz Nyquist
+				if (cutoff8k < 1000.0f) cutoff8k = 1000.0f; // keep it reasonable
+			}
+			float srcCutoff = cutoff8k / playbackSpeed;
+			AntiAliasLowpassMono(monoSrc, inFrames, srcCutoff, (float)m_State.sampleRate, m_State.aaZ);
 		}
 
 		static short pcm8k[2048];
@@ -838,19 +904,11 @@ void CVoicePlayback::Update()
 		// one ~FRAME_SAMPLES_8K output frame, so output size stays bounded regardless of speed.
 		int resampleInputRate = (int)(m_State.sampleRate * playbackSpeed);
 		if (resampleInputRate < 1) resampleInputRate = 1;
-		int numSamples8k = ConvertToMonoResample(
-			pcm16Buffer, numSourceSamples, resampleInputRate, m_State.channels,
+		int numSamples8k = ResampleMonoLinear(
+			monoSrc, inFrames, resampleInputRate,
 			pcm8k, (int)(sizeof(pcm8k) / sizeof(pcm8k[0])), 8000
 		);
-		// Low-pass to remove >4 kHz content now that we're at 8 kHz (Nyquist 4 kHz).
 		if (numSamples8k > 0) {
-			float cutoffHz = 3800.0f;
-			if (g_pcv_rev_playback_lp_hz && g_pcv_rev_playback_lp_hz->value > 0.0f) {
-				cutoffHz = g_pcv_rev_playback_lp_hz->value;
-				if (cutoffHz > 3900.0f) cutoffHz = 3900.0f; // tiny headroom below Nyquist
-				if (cutoffHz < 1000.0f) cutoffHz = 1000.0f; // keep it reasonable
-			}
-			ApplyLowpass8k(pcm8k, numSamples8k, cutoffHz, 8000.0f, m_State.lowpassState);
 			// Apply volume scaling. Effective volume = the StartPlayback arg (m_State.volume,
 			// 1.0 for the menu path / sv_playvoice) times the live REV_PlaybackVolume cvar.
 			// Read live so menu changes take effect mid-song. Bot path only.

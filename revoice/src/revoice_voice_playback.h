@@ -27,7 +27,7 @@ private:
 		int pcm8kCarrySamples;
 		int framesSinceReset;
 		int resetGapFramesRemaining;
-		float lowpassState;
+		float aaZ[4];   // anti-alias filter state (two cascaded biquads), persisted across frames
 	};
 	
 	PlaybackState m_State;
