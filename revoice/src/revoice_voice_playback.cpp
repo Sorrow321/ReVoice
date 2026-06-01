@@ -292,6 +292,15 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 	// counters) whenever that player was speaking at the same time as playback.
 	g_VoicePlayback.InitCodecs();
 
+	// Optional: reset each playback encoder's state at the start of every packet so the
+	// packet is self-contained (its first frame carries no cross-packet prediction). Test
+	// for per-packet boundary clicks caused by a client that resets its decoder per packet.
+	if (g_pcv_rev_playback_packet_reset && g_pcv_rev_playback_packet_reset->value != 0.0f) {
+		if (g_VoicePlayback.GetOpusCodec())  g_VoicePlayback.GetOpusCodec()->ResetState();
+		if (g_VoicePlayback.GetSilkCodec())  g_VoicePlayback.GetSilkCodec()->ResetState();
+		if (g_VoicePlayback.GetSpeexCodec()) g_VoicePlayback.GetSpeexCodec()->ResetState();
+	}
+
 	if (REV_PlaybackDebugVerbose())
 		REV_PlaybackDebugPrint("[ReVoice Playback] Broadcasting to all active clients (per-destination codec)\n");
 
