@@ -309,6 +309,9 @@ qboolean ClientConnect_PreHook(edict_t *pEntity, const char *pszName, const char
 	CRevoicePlayer *plr = GetPlayerByEdict(pEntity);
 	plr->OnConnected();
 
+	// A fresh occupant of this slot must not inherit a previous player's /mutebot.
+	REV_SetPlaybackMute(g_engfuncs.pfnIndexOfEdict(pEntity) - 1, false);
+
 	RETURN_META_VALUE(MRES_IGNORED, TRUE);
 }
 
@@ -330,6 +333,10 @@ void ClientCommand_PreHook(edict_t *pEntity)
 void ServerActivate_PostHook(edict_t *pEdictList, int edictCount, int clientMax)
 {
 	Revoice_Exec_Config();
+
+	// New map: clear per-listener playback mutes so ReVoice's state matches the
+	// AMXX plugin, which resets its own /mutebot table on each map load.
+	REV_ResetAllPlaybackMutes();
 
 	// Once-per-map-boundary check for the auto-dump scheduler. This is the
 	// only place outside the explicit `rv_upload_dump` command that can

@@ -1,2 +1,3 @@
 - [ReVoice playback crackle root cause](revoice-playback-crackle-rootcause.md) — per-packet crackle is client-side playout, not our packets; what's ruled out and the 24kHz win
 - [ReVoice build workflow](revoice-build-workflow.md) — user compiles on another machine + remote server; slow iteration, prefer cvar-gated changes
+- [DJ menu now-playing HUD + bot mute](revoice-djmenu-nowplaying-mute.md) — duration from WAV header, elapsed tracked plugin-side, personal /mutebot via voice forward (no IPC)

@@ -65,6 +65,42 @@ struct REV_ClientVoiceQueue {
 
 static REV_ClientVoiceQueue g_PlaybackVoiceQueues[MAX_PLAYERS];
 
+// Per-listener playback mute (0-based). Set via sv_voicemute (AMXX /mutebot).
+// Listener-side: the emitter bot keeps playing; muted clients simply aren't sent
+// the frames. Indexed by client slot, 0-based.
+static bool g_RevPlaybackMuted[MAX_PLAYERS] = { false };
+
+void REV_SetPlaybackMute(int clientIdx0, bool muted)
+{
+	if (clientIdx0 < 0 || clientIdx0 >= MAX_PLAYERS)
+		return;
+	g_RevPlaybackMuted[clientIdx0] = muted;
+
+	// Drop any frames already queued for this client so unmuting doesn't release
+	// a burst of stale audio.
+	if (muted) {
+		g_PlaybackVoiceQueues[clientIdx0].head = 0;
+		g_PlaybackVoiceQueues[clientIdx0].tail = 0;
+		g_PlaybackVoiceQueues[clientIdx0].count = 0;
+	}
+}
+
+bool REV_GetPlaybackMute(int clientIdx0)
+{
+	if (clientIdx0 < 0 || clientIdx0 >= MAX_PLAYERS)
+		return false;
+	return g_RevPlaybackMuted[clientIdx0];
+}
+
+// Clear every per-listener mute. Called at each map boundary so the metamod
+// state can't drift from the AMXX plugin's (which resets its own table on
+// plugin_init / map change).
+void REV_ResetAllPlaybackMutes()
+{
+	for (int i = 0; i < MAX_PLAYERS; i++)
+		g_RevPlaybackMuted[i] = false;
+}
+
 // Playback queue stats (aggregated, printed by Update() once/sec when REV_PlaybackDebug=1)
 static int g_dbgQ_enqueued = 0;
 static int g_dbgQ_dropped = 0;
@@ -329,6 +365,9 @@ static void BroadcastVoiceData(const short* pcm8k, int numSamples8k, int sourceP
 		if (!dstClient || !dstClient->IsActive())
 			continue;
 		if (targetMask && !targetMask[i])
+			continue;
+		// Per-listener mute (AMXX /mutebot): don't send playback to this client.
+		if (g_RevPlaybackMuted[i])
 			continue;
 
 		// Determine destination codec type using ReVoice player tracking
@@ -1140,8 +1179,9 @@ void Revoice_VoicePlayback_Init()
 	g_engfuncs.pfnAddServerCommand("sv_voiceseek", Cmd_VoiceSeek);
 	g_engfuncs.pfnAddServerCommand("sv_pausevoice", Cmd_PauseVoice);
 	g_engfuncs.pfnAddServerCommand("sv_resumevoice", Cmd_ResumeVoice);
+	g_engfuncs.pfnAddServerCommand("sv_voicemute", Cmd_VoiceMute);
 	g_VoicePlayback.InitCodecs();
-	SERVER_PRINT("[ReVoice] Voice playback commands registered: sv_playvoice, sv_playvoice_ex, sv_stopvoice, sv_voiceseek, sv_pausevoice, sv_resumevoice\n");
+	SERVER_PRINT("[ReVoice] Voice playback commands registered: sv_playvoice, sv_playvoice_ex, sv_stopvoice, sv_voiceseek, sv_pausevoice, sv_resumevoice, sv_voicemute\n");
 }
 
 // Actor descriptor for the action log. The AMXX menu passes a quoted token
@@ -1220,6 +1260,26 @@ void Cmd_ResumeVoice()
 	} else {
 		SERVER_PRINT("[ReVoice] sv_resumevoice: nothing to resume\n");
 	}
+}
+
+// sv_voicemute <slot> <0|1>  — per-listener playback mute (AMXX /mutebot).
+// slot is the 1-based engine client index; 1 = mute, 0 = unmute.
+void Cmd_VoiceMute()
+{
+	if (CMD_ARGC() < 3) {
+		SERVER_PRINT("Usage: sv_voicemute <slot> <0|1>\n");
+		return;
+	}
+
+	int slot = atoi(CMD_ARGV(1));   // 1-based
+	int on   = atoi(CMD_ARGV(2));
+
+	if (slot < 1 || slot > MAX_PLAYERS) {
+		SERVER_PRINT("[ReVoice] sv_voicemute: slot out of range\n");
+		return;
+	}
+
+	REV_SetPlaybackMute(slot - 1, on != 0);
 }
 
 // sv_playvoice <filename> [actor]

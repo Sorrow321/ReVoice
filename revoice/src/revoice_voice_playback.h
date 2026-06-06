@@ -91,5 +91,14 @@ void Cmd_StopVoice();
 void Cmd_VoiceSeek();
 void Cmd_PauseVoice();
 void Cmd_ResumeVoice();
+void Cmd_VoiceMute();
 void Cmd_PlayVoice_Client(edict_t* pEntity);
+
+// Per-listener playback mute (0-based client index). When muted, that client is
+// not sent any artificial playback voice frames. Driven by the AMXX /mutebot
+// command through the sv_voicemute console command; cleared when a slot's client
+// (re)connects so a recycled slot never inherits a mute.
+void REV_SetPlaybackMute(int clientIdx0, bool muted);
+bool REV_GetPlaybackMute(int clientIdx0);
+void REV_ResetAllPlaybackMutes();
 
