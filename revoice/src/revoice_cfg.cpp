@@ -49,6 +49,11 @@ cvar_t g_cv_rev_playback_active = { "REV_PlaybackActive", "0", 0, 0.0f, nullptr 
 cvar_t g_cv_rev_playback_volume = { "REV_PlaybackVolume", "1.0", 0, 0.0f, nullptr }; // bot-playback volume (1.0 = 100%)
 cvar_t g_cv_rev_playback_speed  = { "REV_PlaybackSpeed",  "1.0", 0, 0.0f, nullptr }; // bot-playback speed (tape-style)
 cvar_t g_cv_rev_voicecmd_verbose = { "REV_VoiceCmdVerbose", "1", 0, 0.0f, nullptr };
+// WAV/ASR tap position for fx-active players. 0 (default) = record the CLEAN
+// pre-fx audio (ASR transcription unaffected by pitch/volume). 1 = record the
+// post-fx audio, i.e. exactly what listeners hear — useful to verify fx via
+// the saved .wav files. Players at default settings are unaffected either way.
+cvar_t g_cv_rev_wav_postfx = { "REV_WavPostFx", "0", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_upload_url        = { "REV_UploadURL", "", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_debug_log         = { "REV_DebugLog", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_auto_upload_dump  = { "REV_AutoUploadDump", "0", 0, 0.0f, nullptr };
@@ -70,6 +75,7 @@ cvar_t *g_pcv_rev_playback_active = nullptr;
 cvar_t *g_pcv_rev_playback_volume = nullptr;
 cvar_t *g_pcv_rev_playback_speed  = nullptr;
 cvar_t *g_pcv_rev_voicecmd_verbose = nullptr;
+cvar_t *g_pcv_rev_wav_postfx = nullptr;
 cvar_t *g_pcv_rev_upload_url        = nullptr;
 cvar_t *g_pcv_rev_debug_log         = nullptr;
 cvar_t *g_pcv_rev_auto_upload_dump  = nullptr;
@@ -96,6 +102,7 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_volume);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_speed);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_voicecmd_verbose);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_wav_postfx);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_upload_url);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_debug_log);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_auto_upload_dump);
@@ -117,6 +124,7 @@ void Revoice_Init_Cvars()
 	g_pcv_rev_playback_volume = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_volume.name);
 	g_pcv_rev_playback_speed  = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_speed.name);
 	g_pcv_rev_voicecmd_verbose = g_engfuncs.pfnCVarGetPointer(g_cv_rev_voicecmd_verbose.name);
+	g_pcv_rev_wav_postfx = g_engfuncs.pfnCVarGetPointer(g_cv_rev_wav_postfx.name);
 	g_pcv_rev_upload_url        = g_engfuncs.pfnCVarGetPointer(g_cv_rev_upload_url.name);
 	g_pcv_rev_debug_log         = g_engfuncs.pfnCVarGetPointer(g_cv_rev_debug_log.name);
 	g_pcv_rev_auto_upload_dump  = g_engfuncs.pfnCVarGetPointer(g_cv_rev_auto_upload_dump.name);

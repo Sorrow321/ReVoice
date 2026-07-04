@@ -28,7 +28,7 @@ Client command (optional):
 - `sv_voice_pitch <player_id> <0.5..2.0>` — duration-preserving pitch shift (1.0 normal, 2.0 octave up, 0.5 octave down). Dual-tap granular shifter with cross-packet state, so packet boundaries stay click-free.
 - Both settings reset on connect, disconnect and map change (cleared explicitly at the map boundary — Metamod does not report staying players as disconnected/reconnected across changelevel). While a player is at the defaults (1.0/1.0) the voice path is identical to stock ReVoice — no fx component runs or is even allocated.
 - Audit trail: every change is appended to `cstrike/addons/amxmodx/logs/RV_actions_YYYYMMDD.log` as an `[FX]` line (always on, independent of `REV_DebugLog`). No `[FX]` lines = the fx code never executed.
-- WAV recordings and ASR always capture the clean pre-fx audio.
+- WAV recordings and ASR capture the clean pre-fx audio by default. Set `REV_WavPostFx 1` to record the post-fx audio instead (exactly what listeners hear) — handy for verifying fx from the saved files; revert to `0` so ASR gets clean speech.
 
 ### Config (cstrike/addons/revoice/revoice.cfg)
 - `REV_RecordVoice` — `0/1` enable WAV recording of player mic (8 kHz mono).

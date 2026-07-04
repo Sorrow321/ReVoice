@@ -84,7 +84,8 @@ int TranscodeVoice(CRevoicePlayer *srcPlayer, const char *srcBuf, int srcBufLen,
 //
 // Unlike the legacy path, the fx path cannot pass the source bytes through
 // (the PCM changed), so it re-encodes for BOTH codec families with the
-// player's dedicated fx encoders. The WAV/ASR tap gets the clean pre-fx PCM.
+// player's dedicated fx encoders. The WAV/ASR tap gets the clean pre-fx PCM
+// by default; REV_WavPostFx 1 moves it after the fx chain (verification aid).
 // ---------------------------------------------------------------------------
 static void BuildVoiceFxBuffers(CRevoicePlayer *srcPlayer, const char *srcBuf, int srcBufLen,
 	IVoiceCodec *srcCodec, CSteamP2PCodec *fxSteamCodec, bool freshStream,
@@ -113,11 +114,19 @@ static void BuildVoiceFxBuffers(CRevoicePlayer *srcPlayer, const char *srcBuf, i
 	if (numSamples > kMaxSamples)
 		numSamples = kMaxSamples;
 
-	// WAV/ASR tap takes the CLEAN decode: recordings and ASR transcription are
-	// unaffected by whatever the fx chain does below.
-	srcPlayer->AppendPcm((const char *)s_decodedPcm, numSamples, 8000);
+	// WAV/ASR tap. Default (REV_WavPostFx 0): tap the CLEAN decode here so
+	// recordings and ASR transcription are unaffected by the fx chain below.
+	// REV_WavPostFx 1 moves the tap after the fx chain instead, so the saved
+	// .wav files contain exactly what listeners hear — the way to verify fx
+	// from disk (at the cost of fx'd audio reaching ASR).
+	const bool wavPostFx = g_pcv_rev_wav_postfx && g_pcv_rev_wav_postfx->value != 0.0f;
+	if (!wavPostFx)
+		srcPlayer->AppendPcm((const char *)s_decodedPcm, numSamples, 8000);
 
 	srcPlayer->ApplyVoiceFx(s_decodedPcm, numSamples, freshStream);
+
+	if (wavPostFx)
+		srcPlayer->AppendPcm((const char *)s_decodedPcm, numSamples, 8000);
 
 	int n = fxSteamCodec->Compress((const char *)s_decodedPcm, numSamples, steamBuf, steamBufCap, false);
 	*steamLen = (n > 0) ? n : 0;
