@@ -750,7 +750,11 @@ void CRevoicePlayer::ApplyVoiceFx(short *pcm, int numSamples, bool freshStream)
 				lpBaseHz = 3900.0f;
 		}
 
-		m_PitchShifter.Process(pcm, numSamples, m_VoicePitch, grainSamples, lpBaseHz);
+		// REV_PitchAlign: 0 = classic dual-tap, 1 = correlation-aligned tap
+		// jumps. Latched per utterance together with the grain window.
+		bool alignJumps = g_pcv_rev_pitch_align && g_pcv_rev_pitch_align->value != 0.0f;
+
+		m_PitchShifter.Process(pcm, numSamples, m_VoicePitch, grainSamples, lpBaseHz, alignJumps);
 	}
 
 	float vol = m_VoiceVolume; // clamped finite by the setter

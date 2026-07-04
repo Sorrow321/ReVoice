@@ -37,6 +37,7 @@ extern cvar_t *g_pcv_rev_voicecmd_verbose;
 extern cvar_t *g_pcv_rev_wav_postfx;       // 0 = WAV/ASR taps clean pre-fx audio (default); 1 = taps post-fx (what listeners hear)
 extern cvar_t *g_pcv_rev_pitch_grain_ms;   // pitch-shifter grain window, ms (10..100); latched per utterance
 extern cvar_t *g_pcv_rev_pitch_lp_hz;      // pitch-shifter anti-alias base cutoff, Hz (1000..3900, <=0 = off); live
+extern cvar_t *g_pcv_rev_pitch_align;      // 0 = classic dual-tap, 1 = correlation-aligned jumps; latched per utterance
 extern cvar_t *g_pcv_rev_upload_url;
 extern cvar_t *g_pcv_rev_debug_log;        // 1 = write RVYYYYMMDD.log diagnostics; 0 = silence
 extern cvar_t *g_pcv_rev_auto_upload_dump; // 1 = nightly auto-trigger of rv_upload_dump; 0 = manual-only

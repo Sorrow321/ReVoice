@@ -58,8 +58,27 @@ public:
 	static const int MIN_WINDOW     = 80;  // 10 ms
 	static const int MAX_WINDOW     = 800; // 100 ms
 
+	// Aligned-jump mode (WSOLA-style): when a tap wraps, instead of jumping
+	// exactly one window it searches +-ALIGN_RANGE samples for the offset that
+	// best correlates with what the other (currently carrying) tap reads, so
+	// the crossfade blends two phase-locked copies instead of arbitrarily
+	// offset ones. ALIGN_CORR_LEN is the comparison segment (~1 pitch period
+	// at 8 kHz speech). The search runs only at tap wraps — a few times per
+	// second — never per sample.
+	//
+	// In aligned mode the tap base delay is biased by ALIGN_RANGE (+12 ms
+	// latency): a tap sweeps its whole window carrying its adjust, so with a
+	// negative adjust an unbiased tap would hit the BASE_DELAY floor before
+	// its next wrap and sit clamped there, playing wrongly-pitched audio at
+	// unity rate for the tail of the grain (found empirically: periodic RMS
+	// dips at the adjust-pattern rate). The bias makes the worst-case sweep
+	// floor exactly BASE_DELAY.
+	static const int ALIGN_RANGE    = 96;  // +-12 ms search
+	static const int ALIGN_CORR_LEN = 96;  // 12 ms reference segment
+
 	static_assert((RING_SIZE & (RING_SIZE - 1)) == 0, "RING_SIZE must be a power of two (mask indexing)");
-	static_assert(BASE_DELAY + MAX_WINDOW + 2 <= RING_SIZE, "max tap look-back must fit inside the ring");
+	static_assert(BASE_DELAY + MAX_WINDOW + 2 * ALIGN_RANGE + 2 <= RING_SIZE, "max tap look-back must fit inside the ring");
+	static_assert(BASE_DELAY + MAX_WINDOW + 2 * ALIGN_RANGE + ALIGN_CORR_LEN + 2 <= RING_SIZE, "correlation reads must fit inside the ring");
 	static_assert(MIN_WINDOW >= 8 && MIN_WINDOW <= DEFAULT_WINDOW && DEFAULT_WINDOW <= MAX_WINDOW, "window bounds sane");
 
 	CVoicePitchShifter() { Reset(); }
@@ -74,6 +93,9 @@ public:
 		m_WritePos = 0;
 		m_Phase    = 0.0;
 		m_Window   = 0; // unlatched; set from windowSamples on first Process()
+		m_Align    = false;
+		m_AdjA     = 0;
+		m_AdjB     = 0;
 		m_LpZ[0] = m_LpZ[1] = m_LpZ[2] = m_LpZ[3] = 0.0f;
 		m_LpWasOn = false;
 	}
@@ -89,8 +111,13 @@ public:
 	// effective cutoff is base/pitch. <= 0 (or NaN) disables the filter —
 	// read live each call, safe to change mid-stream (state persists, same
 	// convention as REV_PlaybackLowpassHz in the playback path).
+	// alignJumps: false = classic dual-tap (taps jump exactly one window,
+	// arbitrary phase between the copies -> comb/"doubling" coloration);
+	// true = WSOLA-style correlation-aligned jumps (see FindAlignedAdjust).
+	// Latched with the window so a live toggle applies from the next stream.
 	void Process(short *pcm, int numSamples, float pitch,
-	             int windowSamples = DEFAULT_WINDOW, float aaCutoffBaseHz = 3600.0f)
+	             int windowSamples = DEFAULT_WINDOW, float aaCutoffBaseHz = 3600.0f,
+	             bool alignJumps = false)
 	{
 		if (pcm == nullptr || numSamples <= 0)
 			return;
@@ -103,13 +130,14 @@ public:
 		if (pitch == 1.0f)
 			return;
 
-		// Latch the grain window for this stream. The clamp keeps the maximum
-		// tap look-back provably inside the ring (see static_asserts above)
-		// no matter what value the caller passes.
+		// Latch the grain window and jump mode for this stream. The clamp
+		// keeps the maximum tap look-back provably inside the ring (see
+		// static_asserts above) no matter what value the caller passes.
 		if (m_Window <= 0) {
 			if (windowSamples < MIN_WINDOW) windowSamples = MIN_WINDOW;
 			if (windowSamples > MAX_WINDOW) windowSamples = MAX_WINDOW;
 			m_Window = windowSamples;
+			m_Align = alignJumps;
 		}
 
 		// NaN compares false with everything, so lowpassOn stays false for a
@@ -147,13 +175,37 @@ public:
 			m_Ring[m_WritePos & (unsigned int)RING_MASK] = ClampPcm16(x);
 			m_WritePos++;
 
+			const double prevPhase = m_Phase;
 			m_Phase += phaseInc;
-			if (m_Phase >= 1.0)     m_Phase -= 1.0;
-			else if (m_Phase < 0.0) m_Phase += 1.0;
+			bool aWrapped = false;
+			if (m_Phase >= 1.0)     { m_Phase -= 1.0; aWrapped = true; }
+			else if (m_Phase < 0.0) { m_Phase += 1.0; aWrapped = true; }
 
 			double phA = m_Phase;
 			double phB = phA + 0.5;
 			if (phB >= 1.0) phB -= 1.0;
+
+			// Aligned mode: re-anchor a tap's delay at the exact moment it
+			// wraps — its gain is 0 there, so the re-anchor is inaudible, and
+			// both read positions advance at the same rate P afterwards, so
+			// the alignment holds for the entire crossfade. Tap B wraps when
+			// phase A crosses 0.5 (phB crosses the 0/1 boundary); at most one
+			// tap can wrap per sample since |phaseInc| << 0.5.
+			// tapBase carries the aligned-mode headroom bias (see ALIGN_RANGE
+			// comment); it is BASE_DELAY exactly in classic mode, keeping that
+			// path bit-identical to the pre-alignment implementation.
+			const double tapBase = (double)(BASE_DELAY + (m_Align ? ALIGN_RANGE : 0));
+			if (m_Align) {
+				if (aWrapped) {
+					m_AdjA = FindAlignedAdjust(
+						tapBase + phA * (double)m_Window,
+						tapBase + phB * (double)m_Window + (double)m_AdjB);
+				} else if ((prevPhase < 0.5) != (m_Phase < 0.5)) {
+					m_AdjB = FindAlignedAdjust(
+						tapBase + phB * (double)m_Window,
+						tapBase + phA * (double)m_Window + (double)m_AdjA);
+				}
+			}
 
 			// Triangle gains: exactly 0 when the corresponding tap wraps (phase
 			// 0/1), and gA + gB == 1 -> the output is a convex combination of
@@ -163,24 +215,30 @@ public:
 			if (gA > 1.0f) gA = 1.0f;
 			float gB = 1.0f - gA;
 
-			pcm[i] = ClampPcm16(gA * ReadTap(phA) + gB * ReadTap(phB));
+			// m_AdjA/m_AdjB are 0 and tapBase == BASE_DELAY in classic mode,
+			// making the delays exactly the pre-alignment formula
+			// (bit-identical legacy output). In aligned mode the sweep floor
+			// is tapBase - ALIGN_RANGE == BASE_DELAY, so a negative adjust can
+			// never hit the ReadTapDelay clamp and pin the tap.
+			double dA = tapBase + phA * (double)m_Window + (double)m_AdjA;
+			double dB = tapBase + phB * (double)m_Window + (double)m_AdjB;
+			pcm[i] = ClampPcm16(gA * ReadTapDelay(dA) + gB * ReadTapDelay(dB));
 		}
 	}
 
 private:
-	// Linear-interpolated read of the tap at 'phase' behind the write head.
-	float ReadTap(double phase) const
+	// Linear-interpolated read at delay 'd' behind the write head.
+	float ReadTapDelay(double d) const
 	{
-		double d = (double)BASE_DELAY + phase * (double)m_Window;
-		// Hard clamp: with phase in [0,1) and m_Window in [MIN,MAX] d is
-		// already in range; this makes an out-of-range delay impossible even
-		// against corrupted state (m_Window <= 0 degrades to a fixed
-		// BASE_DELAY read — still in bounds), and the inverted first
+		// Hard clamp: legitimate delays are BASE_DELAY + phase*window (+ the
+		// bounded alignment adjust); this makes an out-of-range delay
+		// impossible even against corrupted state (m_Window <= 0 degrades to
+		// a fixed BASE_DELAY read — still in bounds), and the inverted first
 		// comparison also catches NaN.
-		if (!(d >= (double)BASE_DELAY))            d = (double)BASE_DELAY;
-		if (d > (double)(BASE_DELAY + MAX_WINDOW)) d = (double)(BASE_DELAY + MAX_WINDOW);
+		if (!(d >= (double)BASE_DELAY))                              d = (double)BASE_DELAY;
+		if (d > (double)(BASE_DELAY + MAX_WINDOW + 2 * ALIGN_RANGE)) d = (double)(BASE_DELAY + MAX_WINDOW + 2 * ALIGN_RANGE);
 
-		unsigned int di = (unsigned int)d;      // in [BASE_DELAY, BASE_DELAY+MAX_WINDOW]
+		unsigned int di = (unsigned int)d;      // in [BASE_DELAY, BASE_DELAY+MAX_WINDOW+2*ALIGN_RANGE]
 		float fr = (float)(d - (double)di);     // in [0,1)
 
 		// The sample d behind the head sits between the samples di ("newer",
@@ -189,6 +247,73 @@ private:
 		unsigned int iNew = (m_WritePos - di)      & (unsigned int)RING_MASK;
 		unsigned int iOld = (m_WritePos - di - 1u) & (unsigned int)RING_MASK;
 		return (float)m_Ring[iNew] * (1.0f - fr) + (float)m_Ring[iOld] * fr;
+	}
+
+	// WSOLA-style jump alignment. Called at the moment a tap wraps: finds the
+	// integer delay adjustment (within +-ALIGN_RANGE) that makes the wrapped
+	// tap's upcoming read best correlate with the segment the OTHER tap — the
+	// one currently carrying the output — is reading. Because both read
+	// positions then advance at the same rate, the two crossfaded copies stay
+	// phase-locked for the whole grain, which removes the comb/"doubling"
+	// coloration of the classic mode on voiced material.
+	//
+	// Runs a few times per second (per tap wrap), never per sample:
+	// (2*ALIGN_RANGE+1) candidates x ALIGN_CORR_LEN MACs. Falls back to 0
+	// (the classic exact-window jump) on silence or uncorrelated content —
+	// then behaves exactly like the unaligned mode. Every ring access is
+	// masked, and all look-backs are compile-time bounded by the
+	// static_asserts above, so no input can push a read outside m_Ring.
+	int FindAlignedAdjust(double nominalDelay, double refDelay) const
+	{
+		// Integer anchor delays, clamped to the same envelope ReadTapDelay
+		// enforces (NaN-safe via the inverted comparison).
+		const int maxD = BASE_DELAY + MAX_WINDOW + 2 * ALIGN_RANGE;
+		if (!(nominalDelay >= (double)BASE_DELAY)) nominalDelay = (double)BASE_DELAY;
+		if (nominalDelay > (double)maxD)           nominalDelay = (double)maxD;
+		if (!(refDelay >= (double)BASE_DELAY))     refDelay = (double)BASE_DELAY;
+		if (refDelay > (double)maxD)               refDelay = (double)maxD;
+		const int canD = (int)(nominalDelay + 0.5);
+		const int refD = (int)(refDelay + 0.5);
+
+		// Reference: the last ALIGN_CORR_LEN samples as the carrying tap reads
+		// them (index wp - D - k, matching ReadTapDelay's addressing).
+		double ref[ALIGN_CORR_LEN];
+		double refEnergy = 0.0;
+		for (int k = 0; k < ALIGN_CORR_LEN; k++) {
+			ref[k] = (double)m_Ring[(m_WritePos - (unsigned int)refD - (unsigned int)k) & (unsigned int)RING_MASK];
+			refEnergy += ref[k] * ref[k];
+		}
+		// Silence / near-silence: nothing to lock onto — keep the exact jump.
+		if (refEnergy <= (double)ALIGN_CORR_LEN)
+			return 0;
+
+		int bestAdj = 0;
+		double bestScore = 0.0;
+		for (int adj = -ALIGN_RANGE; adj <= ALIGN_RANGE; adj++) {
+			// Keep the candidate delay inside the legitimate envelope; masked
+			// reads below are safe regardless, this only skips silly anchors.
+			const int d = canD + adj;
+			if (d < BASE_DELAY || d > maxD)
+				continue;
+
+			double dot = 0.0, energy = 0.0;
+			for (int k = 0; k < ALIGN_CORR_LEN; k++) {
+				double v = (double)m_Ring[(m_WritePos - (unsigned int)d - (unsigned int)k) & (unsigned int)RING_MASK];
+				dot += v * ref[k];
+				energy += v * v;
+			}
+			if (dot <= 0.0)
+				continue; // anti-phase or uncorrelated — never pick those
+
+			// Normalized score without the sqrt: maximizing dot/sqrt(energy)
+			// == maximizing dot^2/energy for dot > 0. (+1 avoids div by zero.)
+			double score = (dot * dot) / (energy + 1.0);
+			if (score > bestScore) {
+				bestScore = score;
+				bestAdj = adj;
+			}
+		}
+		return bestAdj;
 	}
 
 	// Same lowpass design as REV_BiquadSetLowpass in revoice_voice_playback.cpp.
@@ -223,6 +348,9 @@ private:
 	unsigned int m_WritePos; // free-running; masked on every access
 	double       m_Phase;    // tap A phase in [0,1); tap B runs 0.5 apart
 	int          m_Window;   // latched grain window in [MIN_WINDOW, MAX_WINDOW]; 0 = unlatched
+	bool         m_Align;    // latched with the window: correlation-aligned tap jumps
+	int          m_AdjA;     // per-tap delay adjustment from FindAlignedAdjust,
+	int          m_AdjB;     //   in [-ALIGN_RANGE, ALIGN_RANGE]; always 0 in classic mode
 	float        m_LpZ[4];   // anti-alias biquad state (2 cascaded sections)
 	bool         m_LpWasOn;  // zero filter state when the lowpass re-engages
 };

@@ -45,6 +45,7 @@ Client command (optional):
 - `REV_WavPostFx` — `0` (default) WAV/ASR records clean pre-fx audio; `1` records post-fx (what listeners hear).
 - `REV_PitchGrainMs` — pitch-shifter grain window in ms (`10..100`, default `56`). The doubling↔shimmer knob: large = less warble but a ~window/2 "doubled voice" echo; small = tighter chorus-like sound but faster warble. Takes effect from the speaker's next utterance.
 - `REV_PitchLowpassHz` — pitch-shifter anti-alias base cutoff in Hz for upward shifts (`1000..3900`, default `3600`; effective cutoff = value/pitch; `0` = filter off — brighter but aliases). Applies live.
+- `REV_PitchAlign` — `0` (default) classic dual-tap shifter; `1` WSOLA-style correlation-aligned tap jumps: removes the comb/"doubled voice" coloration on voiced speech in exchange for ~12 ms extra latency and slight micro-timing jitter at grain boundaries. Takes effect from the speaker's next utterance.
 
 ### Notes
 - Playback prefers a bot emitter if present; otherwise uses a real player slot.

@@ -63,6 +63,11 @@ cvar_t g_cv_rev_pitch_grain_ms = { "REV_PitchGrainMs", "56", 0, 0.0f, nullptr };
 // (effective cutoff = value / pitch). Clamped 1000..3900; <= 0 = filter OFF
 // (brighter but aliases). Read live, mid-utterance changes are fine.
 cvar_t g_cv_rev_pitch_lp_hz = { "REV_PitchLowpassHz", "3600", 0, 0.0f, nullptr };
+// Pitch-shifter tap-jump mode. 0 = classic dual-tap (exact one-window jumps;
+// slight comb/"doubled voice" coloration). 1 = WSOLA-style correlation-aligned
+// jumps (phase-locks the crossfaded copies; trades the doubling for a few ms
+// of micro-timing jitter at grain boundaries). Latched per utterance.
+cvar_t g_cv_rev_pitch_align = { "REV_PitchAlign", "0", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_upload_url        = { "REV_UploadURL", "", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_debug_log         = { "REV_DebugLog", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_auto_upload_dump  = { "REV_AutoUploadDump", "0", 0, 0.0f, nullptr };
@@ -87,6 +92,7 @@ cvar_t *g_pcv_rev_voicecmd_verbose = nullptr;
 cvar_t *g_pcv_rev_wav_postfx = nullptr;
 cvar_t *g_pcv_rev_pitch_grain_ms = nullptr;
 cvar_t *g_pcv_rev_pitch_lp_hz = nullptr;
+cvar_t *g_pcv_rev_pitch_align = nullptr;
 cvar_t *g_pcv_rev_upload_url        = nullptr;
 cvar_t *g_pcv_rev_debug_log         = nullptr;
 cvar_t *g_pcv_rev_auto_upload_dump  = nullptr;
@@ -116,6 +122,7 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_wav_postfx);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_pitch_grain_ms);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_pitch_lp_hz);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_pitch_align);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_upload_url);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_debug_log);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_auto_upload_dump);
@@ -140,6 +147,7 @@ void Revoice_Init_Cvars()
 	g_pcv_rev_wav_postfx = g_engfuncs.pfnCVarGetPointer(g_cv_rev_wav_postfx.name);
 	g_pcv_rev_pitch_grain_ms = g_engfuncs.pfnCVarGetPointer(g_cv_rev_pitch_grain_ms.name);
 	g_pcv_rev_pitch_lp_hz = g_engfuncs.pfnCVarGetPointer(g_cv_rev_pitch_lp_hz.name);
+	g_pcv_rev_pitch_align = g_engfuncs.pfnCVarGetPointer(g_cv_rev_pitch_align.name);
 	g_pcv_rev_upload_url        = g_engfuncs.pfnCVarGetPointer(g_cv_rev_upload_url.name);
 	g_pcv_rev_debug_log         = g_engfuncs.pfnCVarGetPointer(g_cv_rev_debug_log.name);
 	g_pcv_rev_auto_upload_dump  = g_engfuncs.pfnCVarGetPointer(g_cv_rev_auto_upload_dump.name);
