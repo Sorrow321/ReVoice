@@ -54,6 +54,15 @@ cvar_t g_cv_rev_voicecmd_verbose = { "REV_VoiceCmdVerbose", "1", 0, 0.0f, nullpt
 // post-fx audio, i.e. exactly what listeners hear — useful to verify fx via
 // the saved .wav files. Players at default settings are unaffected either way.
 cvar_t g_cv_rev_wav_postfx = { "REV_WavPostFx", "0", 0, 0.0f, nullptr };
+// Pitch-shifter grain window in ms (10..100). The doubling<->shimmer knob:
+// large = cleaner but reads as a ~window/2 "doubled voice" echo; small =
+// tighter/chorus-like but faster warble. Latched per utterance, so a live
+// change applies from the speaker's NEXT utterance.
+cvar_t g_cv_rev_pitch_grain_ms = { "REV_PitchGrainMs", "56", 0, 0.0f, nullptr };
+// Pitch-shifter anti-alias low-pass base cutoff in Hz for upward shifts
+// (effective cutoff = value / pitch). Clamped 1000..3900; <= 0 = filter OFF
+// (brighter but aliases). Read live, mid-utterance changes are fine.
+cvar_t g_cv_rev_pitch_lp_hz = { "REV_PitchLowpassHz", "3600", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_upload_url        = { "REV_UploadURL", "", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_debug_log         = { "REV_DebugLog", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_auto_upload_dump  = { "REV_AutoUploadDump", "0", 0, 0.0f, nullptr };
@@ -76,6 +85,8 @@ cvar_t *g_pcv_rev_playback_volume = nullptr;
 cvar_t *g_pcv_rev_playback_speed  = nullptr;
 cvar_t *g_pcv_rev_voicecmd_verbose = nullptr;
 cvar_t *g_pcv_rev_wav_postfx = nullptr;
+cvar_t *g_pcv_rev_pitch_grain_ms = nullptr;
+cvar_t *g_pcv_rev_pitch_lp_hz = nullptr;
 cvar_t *g_pcv_rev_upload_url        = nullptr;
 cvar_t *g_pcv_rev_debug_log         = nullptr;
 cvar_t *g_pcv_rev_auto_upload_dump  = nullptr;
@@ -103,6 +114,8 @@ void Revoice_Init_Cvars()
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_playback_speed);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_voicecmd_verbose);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_wav_postfx);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_pitch_grain_ms);
+	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_pitch_lp_hz);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_upload_url);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_debug_log);
 	g_engfuncs.pfnCvar_RegisterVariable(&g_cv_rev_auto_upload_dump);
@@ -125,6 +138,8 @@ void Revoice_Init_Cvars()
 	g_pcv_rev_playback_speed  = g_engfuncs.pfnCVarGetPointer(g_cv_rev_playback_speed.name);
 	g_pcv_rev_voicecmd_verbose = g_engfuncs.pfnCVarGetPointer(g_cv_rev_voicecmd_verbose.name);
 	g_pcv_rev_wav_postfx = g_engfuncs.pfnCVarGetPointer(g_cv_rev_wav_postfx.name);
+	g_pcv_rev_pitch_grain_ms = g_engfuncs.pfnCVarGetPointer(g_cv_rev_pitch_grain_ms.name);
+	g_pcv_rev_pitch_lp_hz = g_engfuncs.pfnCVarGetPointer(g_cv_rev_pitch_lp_hz.name);
 	g_pcv_rev_upload_url        = g_engfuncs.pfnCVarGetPointer(g_cv_rev_upload_url.name);
 	g_pcv_rev_debug_log         = g_engfuncs.pfnCVarGetPointer(g_cv_rev_debug_log.name);
 	g_pcv_rev_auto_upload_dump  = g_engfuncs.pfnCVarGetPointer(g_cv_rev_auto_upload_dump.name);

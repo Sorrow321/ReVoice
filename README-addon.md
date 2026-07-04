@@ -42,6 +42,9 @@ Client command (optional):
 - `REV_PlaybackLowpassHz` — low-pass cutoff (1000..3900) applied to playback at 8 kHz.
 - `REV_PlaybackBotName` — substring to find the bot used as the voice emitter.
 - `REV_VoiceCmdVerbose` — `0/1` enable server console prints for `sv_voice_volume`/`sv_voice_pitch`.
+- `REV_WavPostFx` — `0` (default) WAV/ASR records clean pre-fx audio; `1` records post-fx (what listeners hear).
+- `REV_PitchGrainMs` — pitch-shifter grain window in ms (`10..100`, default `56`). The doubling↔shimmer knob: large = less warble but a ~window/2 "doubled voice" echo; small = tighter chorus-like sound but faster warble. Takes effect from the speaker's next utterance.
+- `REV_PitchLowpassHz` — pitch-shifter anti-alias base cutoff in Hz for upward shifts (`1000..3900`, default `3600`; effective cutoff = value/pitch; `0` = filter off — brighter but aliases). Applies live.
 
 ### Notes
 - Playback prefers a bot emitter if present; otherwise uses a real player slot.

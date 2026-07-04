@@ -724,8 +724,34 @@ void CRevoicePlayer::ApplyVoiceFx(short *pcm, int numSamples, bool freshStream)
 	}
 	m_FxStreamContinuous = true;
 
-	if (m_VoicePitch != 1.0f)
-		m_PitchShifter.Process(pcm, numSamples, m_VoicePitch);
+	if (m_VoicePitch != 1.0f) {
+		// Tuning cvars, read here only (fx path) so default players never touch
+		// them. Grain window: NaN/out-of-range falls back to the default; the
+		// shifter latches it per utterance. Anti-alias cutoff: playback-style
+		// semantics (<= 0 = off), clamped to 1000..3900 Hz, applied live.
+		float grainMs = 56.0f;
+		if (g_pcv_rev_pitch_grain_ms) {
+			float v = g_pcv_rev_pitch_grain_ms->value;
+			if (v >= 10.0f && v <= 100.0f)
+				grainMs = v;
+		}
+		int grainSamples = (int)(grainMs * 8.0f); // 8 kHz: 10..100 ms -> 80..800
+
+		float lpBaseHz = 3600.0f;
+		if (g_pcv_rev_pitch_lp_hz) {
+			float v = g_pcv_rev_pitch_lp_hz->value;
+			if (v <= 0.0f)
+				lpBaseHz = 0.0f; // filter off
+			else if (v >= 1000.0f && v <= 3900.0f)
+				lpBaseHz = v;    // NaN/out-of-range keeps the default
+			else if (v < 1000.0f)
+				lpBaseHz = 1000.0f;
+			else if (v > 3900.0f)
+				lpBaseHz = 3900.0f;
+		}
+
+		m_PitchShifter.Process(pcm, numSamples, m_VoicePitch, grainSamples, lpBaseHz);
+	}
 
 	float vol = m_VoiceVolume; // clamped finite by the setter
 	if (vol != 1.0f) {

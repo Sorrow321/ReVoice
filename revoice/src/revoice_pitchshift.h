@@ -46,21 +46,34 @@ class CVoicePitchShifter {
 public:
 	static const int RING_SIZE  = 2048; // 256 ms @ 8 kHz, power of two
 	static const int RING_MASK  = RING_SIZE - 1;
-	static const int WINDOW     = 448;  // grain window: 56 ms @ 8 kHz
 	static const int BASE_DELAY = 2;    // keeps the interpolation pair >= 1 sample behind the write head
 
+	// Grain window in samples @ 8 kHz — the main quality knob. Large windows
+	// minimize warble but read as a ~W/2 "doubled voice" echo; small windows
+	// fuse into a chorus/flanger tinge but shimmer faster. Runtime-tunable
+	// per stream within [MIN_WINDOW, MAX_WINDOW]; the value is LATCHED at the
+	// first processed packet after Reset(), so a live change can never jump
+	// the taps mid-utterance.
+	static const int DEFAULT_WINDOW = 448; // 56 ms
+	static const int MIN_WINDOW     = 80;  // 10 ms
+	static const int MAX_WINDOW     = 800; // 100 ms
+
 	static_assert((RING_SIZE & (RING_SIZE - 1)) == 0, "RING_SIZE must be a power of two (mask indexing)");
-	static_assert(BASE_DELAY + WINDOW + 2 <= RING_SIZE, "max tap look-back must fit inside the ring");
+	static_assert(BASE_DELAY + MAX_WINDOW + 2 <= RING_SIZE, "max tap look-back must fit inside the ring");
+	static_assert(MIN_WINDOW >= 8 && MIN_WINDOW <= DEFAULT_WINDOW && DEFAULT_WINDOW <= MAX_WINDOW, "window bounds sane");
 
 	CVoicePitchShifter() { Reset(); }
 
 	// Forget all carried audio/state. Call at utterance boundaries and whenever
 	// volume/pitch settings change, so a new stream never reads stale audio.
+	// Also unlatches the grain window, so the next stream picks up a live
+	// window/cvar change.
 	void Reset()
 	{
 		memset(m_Ring, 0, sizeof(m_Ring));
 		m_WritePos = 0;
 		m_Phase    = 0.0;
+		m_Window   = 0; // unlatched; set from windowSamples on first Process()
 		m_LpZ[0] = m_LpZ[1] = m_LpZ[2] = m_LpZ[3] = 0.0f;
 		m_LpWasOn = false;
 	}
@@ -68,7 +81,16 @@ public:
 	// In-place shift of numSamples PCM16 samples by factor 'pitch'
 	// (0.5 = octave down .. 2.0 = octave up). pitch outside that range
 	// (including NaN/inf) is clamped; 1.0 is an exact bypass.
-	void Process(short *pcm, int numSamples, float pitch)
+	//
+	// windowSamples: grain window, clamped to [MIN_WINDOW, MAX_WINDOW] and
+	// latched until the next Reset() (changing it mid-stream would jump the
+	// tap delays audibly, so later values are ignored until then).
+	// aaCutoffBaseHz: anti-alias low-pass base cutoff for upward shifts; the
+	// effective cutoff is base/pitch. <= 0 (or NaN) disables the filter —
+	// read live each call, safe to change mid-stream (state persists, same
+	// convention as REV_PlaybackLowpassHz in the playback path).
+	void Process(short *pcm, int numSamples, float pitch,
+	             int windowSamples = DEFAULT_WINDOW, float aaCutoffBaseHz = 3600.0f)
 	{
 		if (pcm == nullptr || numSamples <= 0)
 			return;
@@ -81,23 +103,34 @@ public:
 		if (pitch == 1.0f)
 			return;
 
-		const bool lowpassOn = (pitch > 1.0f);
+		// Latch the grain window for this stream. The clamp keeps the maximum
+		// tap look-back provably inside the ring (see static_asserts above)
+		// no matter what value the caller passes.
+		if (m_Window <= 0) {
+			if (windowSamples < MIN_WINDOW) windowSamples = MIN_WINDOW;
+			if (windowSamples > MAX_WINDOW) windowSamples = MAX_WINDOW;
+			m_Window = windowSamples;
+		}
+
+		// NaN compares false with everything, so lowpassOn stays false for a
+		// NaN cutoff; MakeLowpass additionally clamps fc to [10, 0.45*fs].
+		const bool lowpassOn = (pitch > 1.0f) && (aaCutoffBaseHz > 0.0f);
 		float c1[5] = { 0, 0, 0, 0, 0 };
 		float c2[5] = { 0, 0, 0, 0, 0 };
 		if (lowpassOn) {
 			if (!m_LpWasOn)
 				m_LpZ[0] = m_LpZ[1] = m_LpZ[2] = m_LpZ[3] = 0.0f;
 			// Butterworth 4th-order, cutoff referenced to the post-shift band:
-			// content above ~3600/P Hz would alias once read P times faster.
-			MakeLowpass(3600.0f / pitch, 8000.0f, 0.54119610f, c1);
-			MakeLowpass(3600.0f / pitch, 8000.0f, 1.30656296f, c2);
+			// content above ~base/P Hz would alias once read P times faster.
+			MakeLowpass(aaCutoffBaseHz / pitch, 8000.0f, 0.54119610f, c1);
+			MakeLowpass(aaCutoffBaseHz / pitch, 8000.0f, 1.30656296f, c2);
 		}
 		m_LpWasOn = lowpassOn;
 
-		// Taps drift at (1-P) samples per sample; one grain cycle spans WINDOW
-		// samples of drift. |phaseInc| <= 0.5/WINDOW < 1, so single-step wrap
-		// handling below is sufficient.
-		const double phaseInc = (1.0 - (double)pitch) / (double)WINDOW;
+		// Taps drift at (1-P) samples per sample; one grain cycle spans
+		// m_Window samples of drift. |phaseInc| <= 0.5/MIN_WINDOW < 1, so
+		// single-step wrap handling below is sufficient.
+		const double phaseInc = (1.0 - (double)pitch) / (double)m_Window;
 
 		for (int i = 0; i < numSamples; i++) {
 			float x = (float)pcm[i];
@@ -138,14 +171,16 @@ private:
 	// Linear-interpolated read of the tap at 'phase' behind the write head.
 	float ReadTap(double phase) const
 	{
-		double d = (double)BASE_DELAY + phase * (double)WINDOW;
-		// Hard clamp: with phase in [0,1) d is already in range; this makes an
-		// out-of-range delay impossible even against corrupted state, and the
-		// inverted first comparison also catches NaN.
-		if (!(d >= (double)BASE_DELAY))          d = (double)BASE_DELAY;
-		if (d > (double)(BASE_DELAY + WINDOW))   d = (double)(BASE_DELAY + WINDOW);
+		double d = (double)BASE_DELAY + phase * (double)m_Window;
+		// Hard clamp: with phase in [0,1) and m_Window in [MIN,MAX] d is
+		// already in range; this makes an out-of-range delay impossible even
+		// against corrupted state (m_Window <= 0 degrades to a fixed
+		// BASE_DELAY read — still in bounds), and the inverted first
+		// comparison also catches NaN.
+		if (!(d >= (double)BASE_DELAY))            d = (double)BASE_DELAY;
+		if (d > (double)(BASE_DELAY + MAX_WINDOW)) d = (double)(BASE_DELAY + MAX_WINDOW);
 
-		unsigned int di = (unsigned int)d;      // in [BASE_DELAY, BASE_DELAY+WINDOW]
+		unsigned int di = (unsigned int)d;      // in [BASE_DELAY, BASE_DELAY+MAX_WINDOW]
 		float fr = (float)(d - (double)di);     // in [0,1)
 
 		// The sample d behind the head sits between the samples di ("newer",
@@ -187,6 +222,7 @@ private:
 	short        m_Ring[RING_SIZE];
 	unsigned int m_WritePos; // free-running; masked on every access
 	double       m_Phase;    // tap A phase in [0,1); tap B runs 0.5 apart
+	int          m_Window;   // latched grain window in [MIN_WINDOW, MAX_WINDOW]; 0 = unlatched
 	float        m_LpZ[4];   // anti-alias biquad state (2 cascaded sections)
 	bool         m_LpWasOn;  // zero filter state when the lowpass re-engages
 };
