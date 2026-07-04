@@ -165,8 +165,13 @@ void SV_ParseVoiceData_emu(IGameClient *cl)
 	srcPlayer->IncreaseVoiceRate(nDataLength);
 
 	char transcodedBuf[4096];
-	char fxSteamBuf[8192];
-	char fxSpeexBuf[8192];
+	// FX output buffers are static so the default (fx-inactive) path pays no
+	// stack for them at all. Safe for the same reason as s_decodedPcm in
+	// BuildVoiceFxBuffers: this handler runs on the engine main thread only,
+	// is non-reentrant, and the buffers are fully consumed by the send loop
+	// below within the same invocation.
+	static char fxSteamBuf[8192];
+	static char fxSpeexBuf[8192];
 
 	char *silkData = nullptr;
 	char *speexData = nullptr;

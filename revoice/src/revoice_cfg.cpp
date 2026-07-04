@@ -63,11 +63,12 @@ cvar_t g_cv_rev_pitch_grain_ms = { "REV_PitchGrainMs", "56", 0, 0.0f, nullptr };
 // (effective cutoff = value / pitch). Clamped 1000..3900; <= 0 = filter OFF
 // (brighter but aliases). Read live, mid-utterance changes are fine.
 cvar_t g_cv_rev_pitch_lp_hz = { "REV_PitchLowpassHz", "3600", 0, 0.0f, nullptr };
-// Pitch-shifter tap-jump mode. 0 = classic dual-tap (exact one-window jumps;
-// slight comb/"doubled voice" coloration). 1 = WSOLA-style correlation-aligned
-// jumps (phase-locks the crossfaded copies; trades the doubling for a few ms
-// of micro-timing jitter at grain boundaries). Latched per utterance.
-cvar_t g_cv_rev_pitch_align = { "REV_PitchAlign", "0", 0, 0.0f, nullptr };
+// Pitch-shifter tap-jump mode. 1 (default) = WSOLA-style correlation-aligned
+// jumps (phase-locks the crossfaded copies; verified to remove the
+// comb/"doubled voice" coloration on real captures at the cost of ~12 ms extra
+// latency and slight micro-timing jitter). 0 = classic dual-tap (exact
+// one-window jumps), kept for A/B comparison. Latched per utterance.
+cvar_t g_cv_rev_pitch_align = { "REV_PitchAlign", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_upload_url        = { "REV_UploadURL", "", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_debug_log         = { "REV_DebugLog", "1", 0, 0.0f, nullptr };
 cvar_t g_cv_rev_auto_upload_dump  = { "REV_AutoUploadDump", "0", 0, 0.0f, nullptr };

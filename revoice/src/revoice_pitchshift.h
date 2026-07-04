@@ -25,9 +25,10 @@
 // SAFETY INVARIANTS (the reasons this cannot read/write out of bounds):
 //   1. Every ring access is masked with RING_MASK (power-of-two size), so any
 //      index value lands inside m_Ring — for ANY pitch, phase or write count.
-//   2. Tap delays are hard-clamped to [BASE_DELAY, BASE_DELAY + WINDOW] before
-//      use; the clamp also catches NaN. The static_asserts below prove the
-//      maximum look-back fits the ring.
+//   2. Tap delays are hard-clamped to
+//      [BASE_DELAY, BASE_DELAY + MAX_WINDOW + 2*ALIGN_RANGE] before use; the
+//      clamp also catches NaN. The static_asserts below prove the maximum
+//      look-back (including the aligned-mode search reads) fits the ring.
 //   3. m_WritePos is unsigned and free-running: wraparound is well-defined
 //      modular arithmetic, consistent with the masked reads.
 //   4. Every float -> int16 conversion goes through ClampPcm16, which handles
