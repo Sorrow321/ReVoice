@@ -1,4 +1,5 @@
 #include "precompiled.h"
+#include <stddef.h> // ptrdiff_t
 
 VoiceEncoder_Silk::VoiceEncoder_Silk()
 {
@@ -95,12 +96,28 @@ int VoiceEncoder_Silk::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 	nSamples = nSamplesToUse - nSamplesRemaining;
 	pWritePos = pCompressed;
 
+	// Room a frame needs before we start writing it: the 2-byte size header
+	// plus a minimal payload budget. Prevents the header from being written
+	// past pWritePosMax when a large input meets a small output buffer (the
+	// old code wrote it unchecked, then handed silk a bogus budget).
+	const ptrdiff_t kMinPayloadRoom = 64;
+
 	while (nSamples > 0)
 	{
+		if ((pWritePosMax - pWritePos) < (ptrdiff_t)sizeof(int16) + kMinPayloadRoom)
+			break; // out of output room: emit what we have, drop the tail
+
 		int16 *pWritePayloadSize = (int16 *)pWritePos;
 		pWritePos += sizeof(int16); //leave 2 bytes for the frame size (will be written after encoding)
 
-		int originalNBytes = (pWritePosMax - pWritePos > 0xFFFF) ? -1 : (pWritePosMax - pWritePos);
+		// Remaining budget for this frame's payload, capped to what the silk
+		// API's int16 in/out size parameter can express. (The old
+		// "-1 when > 0xFFFF" sentinel truncated to a NEGATIVE int16 budget for
+		// remaining room in 0x8000..0xFFFF.)
+		ptrdiff_t room = pWritePosMax - pWritePos;
+		if (room > 0x7FFF)
+			room = 0x7FFF;
+
 		nSamplesToEncode = (nSamples < nSamplesPerFrame) ? nSamples : nSamplesPerFrame;
 
 		this->m_encControl.useDTX = 0;
@@ -114,8 +131,16 @@ int VoiceEncoder_Silk::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 
 		nSamples -= nSamplesToEncode;
 
-		int16 nBytes = originalNBytes;
+		int16 nBytes = (int16)room;
 		int res = SKP_Silk_SDK_Encode(this->m_pEncoder, &this->m_encControl, psRead, nSamplesToEncode, (unsigned char *)pWritePos, &nBytes);
+		if (res != SKP_SILK_NO_ERROR || nBytes < 0 || (ptrdiff_t)nBytes > room)
+		{
+			// Encoder error (the old code ignored res and advanced by whatever
+			// was left in nBytes): unwind the header and stop cleanly.
+			pWritePos = (char *)pWritePayloadSize;
+			break;
+		}
+
 		*pWritePayloadSize = nBytes; //write frame size
 
 		pWritePos += nBytes;
@@ -132,7 +157,7 @@ int VoiceEncoder_Silk::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 	{
 		ResetState();
 
-		if (pWritePosMax > pWritePos + 2) {
+		if ((pWritePosMax - pWritePos) >= (ptrdiff_t)sizeof(uint16)) {
 			uint16 *pWriteEndFlag = (uint16*)pWritePos;
 			pWritePos += sizeof(uint16);
 			*pWriteEndFlag = 0xFFFF;

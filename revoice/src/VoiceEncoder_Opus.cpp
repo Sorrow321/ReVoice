@@ -1,4 +1,5 @@
 #include "precompiled.h"
+#include <stddef.h> // ptrdiff_t
 
 VoiceEncoder_Opus::VoiceEncoder_Opus() : m_bitrate(32000), m_samplerate(8000)
 {
@@ -135,8 +136,18 @@ int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 	if (nChunks > 0)
 	{
 		int nRemainingSamples = (nChunks - 1) / FRAME_SIZE + 1;
+		// Room a frame needs before we start writing it: 2 bytes payload size,
+		// 2 bytes PLC sequence, plus a minimal payload budget. Prevents the
+		// headers below from ever being written past pWritePosMax and
+		// opus_encode from ever receiving a non-positive budget (large inputs
+		// against a small output buffer previously smashed past the end).
+		const ptrdiff_t nHeaderBytes = sizeof(uint16) + (m_PacketLossConcealment ? sizeof(uint16) : 0);
+		const ptrdiff_t kMinPayloadRoom = 16;
 		do
 		{
+			if ((pWritePosMax - pWritePos) < nHeaderBytes + kMinPayloadRoom)
+				break; // out of output room: emit what we have, drop the tail
+
 			uint16 *pWritePayloadSize = (uint16 *)pWritePos;
 			pWritePos += sizeof(uint16); // leave 2 bytes for the frame size (will be written after encoding)
 
@@ -146,8 +157,17 @@ int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 				pWritePos += sizeof(uint16);
 			}
 
-			int nBytes = ((pWritePosMax - pWritePos) < 0x7FFF) ? (pWritePosMax - pWritePos) : 0x7FFF;
+			int nBytes = ((pWritePosMax - pWritePos) < 0x7FFF) ? (int)(pWritePosMax - pWritePos) : 0x7FFF;
 			int nWriteBytes = opus_encode(m_pEncoder, (const opus_int16 *)psRead, FRAME_SIZE, (unsigned char *)pWritePos, nBytes);
+			if (nWriteBytes < 0)
+			{
+				// Encoder error: unwind this frame's headers and stop — never
+				// advance pWritePos by a negative count or record a bogus size.
+				if (m_PacketLossConcealment)
+					m_nEncodeSeq--;
+				pWritePos = (char *)pWritePayloadSize;
+				break;
+			}
 
 			// Advance by exactly one frame of PCM.
 			// psRead is a byte pointer to 16-bit mono PCM, so increment by FRAME_SIZE * BYTES_PER_SAMPLE.
@@ -156,7 +176,7 @@ int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 			pWritePos += nWriteBytes;
 
 			nRemainingSamples--;
-			*pWritePayloadSize = nWriteBytes;
+			*pWritePayloadSize = (uint16)nWriteBytes;
 		}
 		while (nRemainingSamples > 0);
 	}
@@ -173,7 +193,7 @@ int VoiceEncoder_Opus::Compress(const char *pUncompressedIn, int nSamplesIn, cha
 	{
 		ResetState();
 
-		if (pWritePosMax > pWritePos + 2)
+		if ((pWritePosMax - pWritePos) >= (ptrdiff_t)sizeof(uint16))
 		{
 			*(uint16 *)pWritePos = 0xFFFF;
 			pWritePos += sizeof(uint16);

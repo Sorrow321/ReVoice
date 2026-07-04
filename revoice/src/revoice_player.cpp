@@ -116,6 +116,16 @@ CRevoicePlayer::CRevoicePlayer()
 	m_WavSeq = 0;
 	m_WavForAsr = false;
 	m_WavAuth[0] = '\0';
+
+	// Voice FX: off. The dedicated fx encoders are lazily created on the first
+	// fx-active packet (see EnsureFxCodecs) so unused slots never allocate them.
+	m_VoiceVolume = 1.0f;
+	m_VoicePitch = 1.0f;
+	m_FxStreamContinuous = false;
+	m_FxCodecsFailed = false;
+	m_FxSilkCodec = nullptr;
+	m_FxOpusCodec = nullptr;
+	m_FxSpeexCodec = nullptr;
 }
 
 void CRevoicePlayer::AppendPcm(const char *pcm16, int numSamples, int sampleRate)
@@ -365,6 +375,11 @@ void CRevoicePlayer::OnConnected()
 	m_OpusCodec->ResetState();
 	m_SpeexCodec->ResetState();
 
+	// A fresh occupant of the slot must never inherit a previous player's
+	// voice fx. Logs only if there was anything to clear (keeps the always-on
+	// RV_actions_*.log free of [FX] lines unless the feature was actually used).
+	ClearVoiceFx("connect");
+
 	// default codec
 	m_CodecType = GetCodecTypeByString(g_pcv_rev_default_codec->string);
 	m_VoiceRate = 0;
@@ -395,6 +410,8 @@ void CRevoicePlayer::OnDisconnected()
 	m_HLTV = false;
 	m_Connected = false;
 	m_Protocol = 0;
+
+	ClearVoiceFx("disconnect");
 
 	FlushWav("disconnect");
 
@@ -441,6 +458,20 @@ void Revoice_FlushAll_Players()
 		g_Players[i].FlushWav("map-boundary");
 	}
 	RvLog("[MAP] flush-all end");
+}
+
+// Voice fx must be cleared at the map boundary explicitly: Metamod plugins do
+// NOT see SV_DropClient / a fresh connect for players who stay through a
+// changelevel, so the per-connection ClearVoiceFx calls never fire for them.
+// Mirrors the AMXX side, which resets its own per-player tables on map load.
+void Revoice_ClearAllVoiceFx()
+{
+	int maxclients = g_RehldsSvs->GetMaxClients();
+	if (maxclients > MAX_PLAYERS)
+		maxclients = MAX_PLAYERS;
+	for (int i = 0; i < maxclients; i++) {
+		g_Players[i].ClearVoiceFx("map-boundary");
+	}
 }
 
 // Periodic state snapshot. Called every server frame; rate-limits itself
@@ -580,4 +611,129 @@ CodecType CRevoicePlayer::GetCodecTypeByString(const char *codec)
 #undef REV_CODEC
 
 	return vct_none;
+}
+
+// ---------------------------------------------------------------------------
+// Voice FX (per-player volume / pitch)
+//
+// None of the functions below run for a player at default settings: the voice
+// path gates on HasActiveVoiceFx() before calling any of them. See the
+// isolation note in revoice_player.h.
+// ---------------------------------------------------------------------------
+
+void CRevoicePlayer::SetVoiceVolume(float volume)
+{
+	if (volume != volume) volume = 1.0f; // NaN -> neutral
+	if (volume < 0.0f)    volume = 0.0f;
+	if (volume > 10.0f)   volume = 10.0f;
+	m_VoiceVolume = volume;
+	ResetVoiceFxStream();
+}
+
+void CRevoicePlayer::SetVoicePitch(float pitch)
+{
+	// Quality clamp only — the shifter's ring reads are masked+clamped and
+	// stay in bounds for any value (see revoice_pitchshift.h). Keep in sync
+	// with the clamps inside CVoicePitchShifter::Process.
+	if (pitch != pitch) pitch = 1.0f; // NaN -> neutral
+	if (pitch < 0.5f)   pitch = 0.5f;
+	if (pitch > 2.0f)   pitch = 2.0f;
+	m_VoicePitch = pitch;
+	ResetVoiceFxStream();
+}
+
+void CRevoicePlayer::ResetVoiceFxStream()
+{
+	m_FxStreamContinuous = false;
+	m_PitchShifter.Reset();
+}
+
+// Full fx wipe: settings back to neutral, shifter/continuity dropped, and the
+// fx encoder streams reset immediately (they would be reset lazily on the next
+// fx packet anyway, but a boundary should leave nothing carried at all).
+// Called on connect, disconnect and — because Metamod does NOT deliver
+// disconnect/connect for players staying through a changelevel — explicitly
+// for every slot at the map boundary (Revoice_ClearAllVoiceFx).
+void CRevoicePlayer::ClearVoiceFx(const char *reason)
+{
+	if (HasActiveVoiceFx()) {
+		RvLogAction("[FX] cleared on %s slot=%d (was vol=%.3f pitch=%.3f)",
+			reason ? reason : "(unknown)",
+			m_Client ? m_Client->GetId() : -1,
+			m_VoiceVolume, m_VoicePitch);
+	}
+	m_VoiceVolume = 1.0f;
+	m_VoicePitch = 1.0f;
+	ResetVoiceFxStream();
+	if (m_FxSilkCodec)  m_FxSilkCodec->ResetState();
+	if (m_FxOpusCodec)  m_FxOpusCodec->ResetState();
+	if (m_FxSpeexCodec) m_FxSpeexCodec->ResetState();
+}
+
+// Lazy, once-per-slot allocation of the dedicated fx encoders. Called only
+// from the fx-active packet path. On any Init failure the half-built codecs
+// are released and fx is permanently latched off for this slot (the caller
+// also resets volume/pitch to neutral, so the gate goes back to the legacy
+// path from the next packet on).
+bool CRevoicePlayer::EnsureFxCodecs()
+{
+	if (m_FxSilkCodec && m_FxOpusCodec && m_FxSpeexCodec)
+		return true;
+	if (m_FxCodecsFailed)
+		return false;
+
+	m_FxSpeexCodec = new VoiceCodec_Frame(new VoiceEncoder_Speex());
+	m_FxSilkCodec  = new CSteamP2PCodec(new VoiceEncoder_Silk());
+	m_FxOpusCodec  = new CSteamP2PCodec(new VoiceEncoder_Opus());
+
+	bool ok = m_FxSpeexCodec->Init(SPEEX_VOICE_QUALITY);
+	ok = m_FxSilkCodec->Init(SILK_VOICE_QUALITY) && ok;
+	ok = m_FxOpusCodec->Init(OPUS_VOICE_QUALITY) && ok;
+
+	if (!ok) {
+		// Release() deletes the wrapper and its backend; a codec whose Init
+		// failed must never see Compress().
+		m_FxSpeexCodec->Release(); m_FxSpeexCodec = nullptr;
+		m_FxSilkCodec->Release();  m_FxSilkCodec  = nullptr;
+		m_FxOpusCodec->Release();  m_FxOpusCodec  = nullptr;
+		m_FxCodecsFailed = true;
+		RvLogAction("[FX] codec init FAILED slot=%d — fx latched off for this slot",
+			m_Client ? m_Client->GetId() : -1);
+		return false;
+	}
+
+	RvLogAction("[FX] codecs allocated slot=%d", m_Client ? m_Client->GetId() : -1);
+	return true;
+}
+
+// In-place effect chain on 8 kHz mono PCM16: pitch first, then gain. The
+// shifter is only touched when pitch != 1, so a volume-only setup provably
+// never executes any pitch-shifter code.
+void CRevoicePlayer::ApplyVoiceFx(short *pcm, int numSamples, bool freshStream)
+{
+	if (pcm == nullptr || numSamples <= 0)
+		return;
+
+	// New utterance (silence gap / map change) or settings changed since the
+	// last fx packet: drop carried DSP+encoder state so nothing stale bleeds in.
+	if (freshStream || !m_FxStreamContinuous) {
+		m_PitchShifter.Reset();
+		if (m_FxSilkCodec)  m_FxSilkCodec->ResetState();
+		if (m_FxOpusCodec)  m_FxOpusCodec->ResetState();
+		if (m_FxSpeexCodec) m_FxSpeexCodec->ResetState();
+	}
+	m_FxStreamContinuous = true;
+
+	if (m_VoicePitch != 1.0f)
+		m_PitchShifter.Process(pcm, numSamples, m_VoicePitch);
+
+	float vol = m_VoiceVolume; // clamped finite by the setter
+	if (vol != 1.0f) {
+		for (int i = 0; i < numSamples; i++) {
+			float v = (float)pcm[i] * vol;
+			if (v >= 32767.0f)       v = 32767.0f;
+			else if (v <= -32768.0f) v = -32768.0f;
+			pcm[i] = (short)v;
+		}
+	}
 }
